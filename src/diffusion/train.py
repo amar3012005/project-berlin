@@ -62,6 +62,12 @@ def main(cfg_path: str) -> None:
     mask_id = add_mask_token(model, tok)
     accel.print(f"[train] surgery applied, [MASK] id={mask_id}, vocab={len(tok)}")
 
+    # torch.compile — free 10-30% via Triton; only on CUDA (skip CPU/MPS to avoid
+    # long warmup + backend gaps). Eager-mask surgery is compile-compatible.
+    if mcfg.get("compile") and torch.cuda.is_available():
+        model = torch.compile(model)
+        accel.print("[train] torch.compile enabled")
+
     loader = build_dataloader(dcfg, tok, tcfg.get("per_device_batch_size", 4),
                               shuffle=not dcfg.get("streaming", False))
 
