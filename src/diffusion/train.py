@@ -138,10 +138,12 @@ def _save(accel, model, tok, out_dir, step, final=False):
     accel.wait_for_everyone()
     tag = "final" if final else f"step{step}"
     path = os.path.join(out_dir, tag)
+    unwrapped = accel.unwrap_model(model)
     if accel.is_main_process:
         os.makedirs(path, exist_ok=True)
         tok.save_pretrained(path)
-    unwrapped = accel.unwrap_model(model)
+        # save config.json too so the ckpt reloads with AutoModel (save_model omits it)
+        unwrapped.config.save_pretrained(path)
     accel.save_model(unwrapped, path)
     accel.print(f"[train] saved checkpoint -> {path}")
 
