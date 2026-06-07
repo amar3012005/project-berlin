@@ -6,7 +6,7 @@ model:
   block_size: 64
   attn_implementation: sdpa                # sdpa (no flash-attn build needed); FA2 later
   trust_remote_code: false
-  compile: false                           # off until fixed-length padding lands
+  compile: true                            # packing => static shapes => compile safe (+15-30%)
 
 data:
   hf_dataset: null
@@ -14,8 +14,10 @@ data:
   jsonl_paths:
     - data/openlegaldata_de.jsonl
     - data/wikipedia_de.jsonl
+  corpus_weights: [1.5, 1.0]     # register balance: upweight legal (fewer docs)
   text_field: text
   max_length: 512
+  pack: true                     # sequence packing — no PAD waste, static shapes
   streaming: false
 
 train:
@@ -29,8 +31,10 @@ train:
   warmup_steps: 150
   min_lr_ratio: 0.1              # cosine decay floor
   weight_decay: 0.01
-  t_min: 1.0e-3
-  mask_schedule: uniform
+  t_min: 0.05                    # clamp low-t (tames 1/t loss variance)
+  mask_schedule: beta            # non-uniform, skewed-low (Dream-7B/CART)
+  mask_block_size: 64            # block-aligned masking (matches attention blocks)
+  loss_weight_alpha: 0.3         # smoothed weight w(t)=alpha+(1-alpha)/t
   grad_clip: 1.0
   precision: bf16
   log_every: 10

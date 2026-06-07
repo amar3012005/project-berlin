@@ -13,35 +13,73 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 
+def _read_lines(paths, text_field, weights=None):
+    """Read jsonl docs; optional per-file sampling weight (register balancing).
+    weights: list[float] same length as paths; repeats files ~proportionally."""
+    per_file: list[list[str]] = []
+    for p in paths:
+        fp = Path(p)
+        if not fp.exists():
+            raise FileNotFoundError(f"corpus file not found: {fp}")
+        docs = []
+        with fp.open(encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                docs.append(json.loads(ln)[text_field])
+        per_file.append(docs)
+    if not weights:
+        return [d for docs in per_file for d in docs]
+    # balance: scale each file's contribution by its weight (oversample by repeat)
+    out = []
+    maxw = max(weights)
+    for docs, w in zip(per_file, weights):
+        reps = max(1, round(w / maxw * (1 if len(docs) else 0)) or 1)
+        out.extend(docs * reps)
+    return out
+
+
 class JsonlTextDataset(Dataset):
-    def __init__(self, paths, text_field, tokenizer, max_length):
+    """One doc per item, truncated/padded to max_length (variable length -> PAD)."""
+    def __init__(self, paths, text_field, tokenizer, max_length, weights=None):
         self.tok = tokenizer
-        self.text_field = text_field
         self.max_length = max_length
-        self.lines: list[str] = []
-        for p in paths:
-            fp = Path(p)
-            if not fp.exists():
-                raise FileNotFoundError(f"corpus file not found: {fp}")
-            with fp.open(encoding="utf-8") as fh:
-                for ln in fh:
-                    ln = ln.strip()
-                    if not ln:
-                        continue
-                    self.lines.append(json.loads(ln)[text_field])
+        self.lines = _read_lines(paths, text_field, weights)
 
     def __len__(self):
         return len(self.lines)
 
     def __getitem__(self, i):
-        enc = self.tok(
-            self.lines[i],
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+        enc = self.tok(self.lines[i], truncation=True,
+                       max_length=self.max_length, return_tensors="pt")
         return {"input_ids": enc["input_ids"][0],
                 "attention_mask": enc["attention_mask"][0]}
+
+
+class PackedDataset(Dataset):
+    """Sequence PACKING: concatenate all docs (eos-separated) and slice into fixed
+    `block` chunks. Zero PAD waste, every token trains, STATIC shapes -> unlocks
+    torch.compile + kernel fusion (the recompile-trap fix). Standard in LLaMA/LLaDA."""
+    def __init__(self, paths, text_field, tokenizer, block, weights=None):
+        self.block = block
+        eos = tokenizer.eos_token_id
+        if eos is None:
+            eos = tokenizer.pad_token_id or 0
+        stream: list[int] = []
+        for doc in _read_lines(paths, text_field, weights):
+            ids = tokenizer(doc, truncation=False)["input_ids"]
+            stream.extend(ids)
+            stream.append(eos)
+        n = (len(stream) // block) * block
+        self.data = torch.tensor(stream[:n], dtype=torch.long).view(-1, block)
+
+    def __len__(self):
+        return self.data.size(0)
+
+    def __getitem__(self, i):
+        ids = self.data[i]
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
 
 
 def _collate(batch, pad_id):
@@ -91,8 +129,16 @@ def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True, num_workers=
         return DataLoader(ds, batch_size=batch_size, collate_fn=_collate_hf,
                           num_workers=num_workers)
 
+    weights = cfg_data.get("corpus_weights")           # register balancing (optional)
+    if cfg_data.get("pack"):                            # PACKED: static shapes, no PAD
+        ds = PackedDataset(cfg_data["jsonl_paths"], cfg_data["text_field"],
+                           tokenizer, cfg_data["max_length"], weights=weights)
+        return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                          num_workers=num_workers, pin_memory=True,
+                          persistent_workers=num_workers > 0, drop_last=True)
+
     ds = JsonlTextDataset(cfg_data["jsonl_paths"], cfg_data["text_field"],
-                          tokenizer, cfg_data["max_length"])
+                          tokenizer, cfg_data["max_length"], weights=weights)
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                       collate_fn=lambda b: _collate(b, pad_id),
                       num_workers=num_workers,

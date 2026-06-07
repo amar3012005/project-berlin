@@ -15,12 +15,19 @@ import torch.nn.functional as F
 @torch.no_grad()
 def generate(model, tok, mask_id: int, prompt: str = "", gen_len: int = 32,
              steps: int = 16, device: str = "cpu", temperature: float = 0.0,
-             show_steps: bool = False, mask_str: str = "▒"):
+             show_steps: bool = False, mask_str: str = "▒",
+             conf_threshold: float = 0.0, repetition_penalty: float = 1.2,
+             top_k: int = 0, ban_token_ids: tuple = ()):
     """Generate `gen_len` tokens via reverse diffusion in `steps` unmasking rounds.
 
-    show_steps=True prints the partially-unmasked text after EACH round — the
-    'Inception' reveal: masked slots render as `mask_str`, filling to real German
-    token-by-token. This is the diffusion effect you watch during inference."""
+    LLaDA-style upgrades:
+      - confidence-aware remasking: a scheduled reveal is only COMMITTED if its
+        confidence >= conf_threshold; low-confidence slots stay masked for a later
+        round (kills the 'whitespace/degenerate' failure mode).
+      - repetition_penalty: down-weight already-present tokens (anti-degeneracy).
+      - top_k + temperature sampling; ban_token_ids to forbid e.g. newline/pad fills.
+
+    show_steps=True prints the partial unmasking each round (the 'Inception' reveal)."""
     model.eval()
     prompt_ids = (tok(prompt, return_tensors="pt")["input_ids"][0].to(device)
                   if prompt else torch.empty(0, dtype=torch.long, device=device))
@@ -32,12 +39,27 @@ def generate(model, tok, mask_id: int, prompt: str = "", gen_len: int = 32,
         seq[0, :p] = prompt_ids
 
     gen_slice = slice(p, total)
-    # cosine reveal schedule: how many of gen_len tokens stay MASKED after step i
+    ban = torch.tensor(list(ban_token_ids), device=device, dtype=torch.long) \
+        if ban_token_ids else None
+
     for step in range(steps):
         is_mask = seq[0, gen_slice] == mask_id
         if not is_mask.any():
             break
         logits = model(input_ids=seq).logits[0, gen_slice]   # (gen_len, vocab)
+
+        # repetition penalty: divide logits of tokens already committed in gen region
+        if repetition_penalty and repetition_penalty != 1.0:
+            present = seq[0, gen_slice][~is_mask]
+            if present.numel():
+                uniq = torch.unique(present)
+                logits[:, uniq] = logits[:, uniq] / repetition_penalty
+        if ban is not None:
+            logits[:, ban] = float("-inf")
+        if top_k and top_k > 0:
+            kth = torch.topk(logits, top_k, dim=-1).values[:, -1, None]
+            logits = torch.where(logits < kth, torch.full_like(logits, float("-inf")), logits)
+
         if temperature > 0:
             probs = F.softmax(logits / temperature, dim=-1)
             pred = torch.multinomial(probs, 1).squeeze(-1)
@@ -46,20 +68,24 @@ def generate(model, tok, mask_id: int, prompt: str = "", gen_len: int = 32,
             probs = F.softmax(logits, dim=-1)
             conf, pred = probs.max(dim=-1)
 
-        # target number still masked after this step (cosine -> 0)
+        # cosine reveal schedule: target #still-masked after this step
         frac = torch.cos(torch.tensor((step + 1) / steps * torch.pi / 2)).item()
         keep_masked = int(gen_len * frac)
 
         conf_masked = conf.clone()
         conf_masked[~is_mask] = float("inf")   # already-revealed stay revealed
         n_reveal = max(1, int(is_mask.sum().item()) - keep_masked)
-        # reveal the n_reveal highest-confidence currently-masked positions
         order = torch.argsort(conf_masked, descending=True)
         reveal_idx = order[:n_reveal]
 
         new_gen = seq[0, gen_slice].clone()
+        last_step = step == steps - 1
         for j in reveal_idx:
             if is_mask[j]:
+                # confidence-aware remasking: skip low-confidence commits (unless final
+                # step, where everything must resolve)
+                if (not last_step) and conf[j].item() < conf_threshold:
+                    continue
                 new_gen[j] = pred[j]
         seq[0, gen_slice] = new_gen
 

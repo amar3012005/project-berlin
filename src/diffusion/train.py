@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 import math
 import yaml
 
@@ -117,7 +118,12 @@ def main(cfg_path: str) -> None:
             break
         for batch in loader:
             with accel.accumulate(model):
-                loss, _ = denoise_loss(model, batch["input_ids"], mask_id, t_min=t_min)
+                loss, _ = denoise_loss(
+                    model, batch["input_ids"], mask_id, t_min=t_min,
+                    schedule=tcfg.get("mask_schedule", "uniform"),
+                    block_size=tcfg.get("mask_block_size", 0),
+                    weight_alpha=float(tcfg.get("loss_weight_alpha", 0.3)),
+                    attention_mask=batch.get("attention_mask"))
                 accel.backward(loss)
                 if accel.sync_gradients:
                     accel.clip_grad_norm_(model.parameters(), grad_clip)

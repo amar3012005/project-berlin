@@ -27,21 +27,63 @@ def add_mask_token(model, tok) -> int:
     return tok.convert_tokens_to_ids(MASK_TOKEN)
 
 
-def forward_mask(input_ids: torch.Tensor, t: torch.Tensor, mask_id: int):
+def sample_t(batch: int, device, schedule: str = "uniform",
+             t_min: float = 0.05, t_max: float = 1.0,
+             beta_a: float = 2.0, beta_b: float = 5.0) -> torch.Tensor:
+    """Sample the per-sequence mask ratio t.
+
+    schedule:
+      uniform : t ~ U[t_min, t_max]            (LLaDA default)
+      beta    : t ~ Beta(a,b) (skewed low)     (Dream-7B/CART: more mass on small
+                masks => easy-correction signal; better perplexity/reasoning)
+    """
+    if schedule == "beta":
+        d = torch.distributions.Beta(beta_a, beta_b)
+        t = d.sample((batch,)).to(device)
+    else:
+        t = torch.rand(batch, device=device)
+    return (t * (t_max - t_min) + t_min).clamp(t_min, t_max)
+
+
+def forward_mask(input_ids: torch.Tensor, t: torch.Tensor, mask_id: int,
+                 block_size: int = 0):
     """Noise the sequence. t: (batch,) masking prob per sequence.
-    Returns (noised_ids, mask_bool) where mask_bool marks corrupted positions."""
-    rand = torch.rand(input_ids.shape, device=input_ids.device)
-    mask_bool = rand < t[:, None]                       # (batch, seq)
+
+    block_size>0 => BLOCK-ALIGNED masking: decide mask per `block_size`-token block
+    (aligned with the bidirectional attention blocks, LLaDA-style) instead of fully
+    independent per-token. Returns (noised_ids, mask_bool)."""
+    b, n = input_ids.shape
+    if block_size and block_size > 1:
+        nblocks = (n + block_size - 1) // block_size
+        blk_rand = torch.rand(b, nblocks, device=input_ids.device)
+        blk_mask = blk_rand < t[:, None]                       # (b, nblocks)
+        mask_bool = blk_mask.repeat_interleave(block_size, dim=1)[:, :n]
+    else:
+        rand = torch.rand(input_ids.shape, device=input_ids.device)
+        mask_bool = rand < t[:, None]
     noised = torch.where(mask_bool, mask_id, input_ids)
     return noised, mask_bool
 
 
 def denoise_loss(model, input_ids: torch.Tensor, mask_id: int,
-                 t_min: float = 1e-3):
-    """One diffusion training step's loss. Samples t, masks, predicts originals."""
+                 t_min: float = 0.05, schedule: str = "uniform",
+                 block_size: int = 0, weight_alpha: float = 0.3,
+                 attention_mask: torch.Tensor | None = None):
+    """One diffusion training step's loss. Samples t, masks, predicts originals.
+
+    Loss weight w(t) = alpha + (1-alpha)/t  — a convex blend of constant and the
+    1/t NELBO estimator. Pure 1/t spikes hard on low-t batches (high variance);
+    blending with a constant floor (alpha) tames the variance while keeping the
+    NELBO signal (Dream-7B/LLaDA-style smoothing)."""
     batch = input_ids.shape[0]
-    t = torch.rand(batch, device=input_ids.device).clamp_min(t_min)
-    noised, mask_bool = forward_mask(input_ids, t, mask_id)
+    t = sample_t(batch, input_ids.device, schedule=schedule, t_min=t_min)
+    noised, mask_bool = forward_mask(input_ids, t, mask_id, block_size=block_size)
+
+    # never mask PAD positions (packed/padded inputs); never count them in loss
+    if attention_mask is not None:
+        pad = attention_mask == 0
+        mask_bool = mask_bool & ~pad
+        noised = torch.where(mask_bool, mask_id, input_ids)
 
     # force >=1 masked token per row so the loss is always defined
     no_mask = ~mask_bool.any(dim=1)
@@ -53,15 +95,14 @@ def denoise_loss(model, input_ids: torch.Tensor, mask_id: int,
 
     logits = model(input_ids=noised).logits          # (batch, seq, vocab)
 
-    # per-token CE on masked positions only
     ce = F.cross_entropy(
         logits.view(-1, logits.size(-1)),
         input_ids.view(-1),
         reduction="none",
     ).view_as(input_ids)                              # (batch, seq)
 
-    # 1/t weighting (LLaDA NELBO estimator), averaged over masked tokens
-    weight = (1.0 / t)[:, None]
+    # smoothed NELBO weight: alpha + (1-alpha)/t  (variance-reduced vs pure 1/t)
+    weight = (weight_alpha + (1.0 - weight_alpha) / t)[:, None]
     masked_ce = ce * mask_bool.float() * weight
     loss = masked_ce.sum() / mask_bool.float().sum().clamp_min(1.0)
     return loss, mask_bool
