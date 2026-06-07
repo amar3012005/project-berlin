@@ -14,8 +14,13 @@ import torch.nn.functional as F
 
 @torch.no_grad()
 def generate(model, tok, mask_id: int, prompt: str = "", gen_len: int = 32,
-             steps: int = 16, device: str = "cpu", temperature: float = 0.0):
-    """Generate `gen_len` tokens via reverse diffusion in `steps` unmasking rounds."""
+             steps: int = 16, device: str = "cpu", temperature: float = 0.0,
+             show_steps: bool = False, mask_str: str = "▒"):
+    """Generate `gen_len` tokens via reverse diffusion in `steps` unmasking rounds.
+
+    show_steps=True prints the partially-unmasked text after EACH round — the
+    'Inception' reveal: masked slots render as `mask_str`, filling to real German
+    token-by-token. This is the diffusion effect you watch during inference."""
     model.eval()
     prompt_ids = (tok(prompt, return_tensors="pt")["input_ids"][0].to(device)
                   if prompt else torch.empty(0, dtype=torch.long, device=device))
@@ -57,6 +62,16 @@ def generate(model, tok, mask_id: int, prompt: str = "", gen_len: int = 32,
             if is_mask[j]:
                 new_gen[j] = pred[j]
         seq[0, gen_slice] = new_gen
+
+        if show_steps:
+            # render current state: masked slots -> mask_str, revealed -> token text
+            toks = []
+            for t_id in seq[0, gen_slice].tolist():
+                toks.append(mask_str if t_id == mask_id
+                            else tok.decode([t_id], skip_special_tokens=True))
+            revealed = (seq[0, gen_slice] != mask_id).sum().item()
+            print(f"[step {step+1:2d}/{steps}] {revealed:3d}/{gen_len} revealed | "
+                  + "".join(toks).replace("\n", " "))
 
     return tok.decode(seq[0, gen_slice], skip_special_tokens=True)
 

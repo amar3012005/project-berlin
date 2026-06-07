@@ -21,7 +21,9 @@ def add_mask_token(model, tok) -> int:
     """Add [MASK] to the tokenizer + resize embeddings. Returns mask token id."""
     if MASK_TOKEN not in tok.get_vocab():
         tok.add_special_tokens({"additional_special_tokens": [MASK_TOKEN]})
-        model.resize_token_embeddings(len(tok))
+        # mean_resizing=False: we add ONE token; the multivariate-normal covariance
+        # init costs ~5min on a 128k-vocab model for zero benefit. Mean init is instant.
+        model.resize_token_embeddings(len(tok), mean_resizing=False)
     return tok.convert_tokens_to_ids(MASK_TOKEN)
 
 

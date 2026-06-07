@@ -4,7 +4,7 @@ compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
 mixed_precision: bf16
 num_machines: 1
-num_processes: 8                 # = number of GPUs in the node
+num_processes: 4                 # = number of GPUs in the node (a100xl_x4)
 rdzv_backend: static
 same_network: true
 fsdp_config:

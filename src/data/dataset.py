@@ -55,7 +55,7 @@ def _collate(batch, pad_id):
     return {"input_ids": ids, "attention_mask": attn}
 
 
-def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True):
+def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True, num_workers=0):
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
@@ -88,9 +88,13 @@ def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True):
                 attn[i, :n] = torch.tensor(b["attention_mask"])
             return {"input_ids": ids, "attention_mask": attn}
 
-        return DataLoader(ds, batch_size=batch_size, collate_fn=_collate_hf)
+        return DataLoader(ds, batch_size=batch_size, collate_fn=_collate_hf,
+                          num_workers=num_workers)
 
     ds = JsonlTextDataset(cfg_data["jsonl_paths"], cfg_data["text_field"],
                           tokenizer, cfg_data["max_length"])
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                      collate_fn=lambda b: _collate(b, pad_id))
+                      collate_fn=lambda b: _collate(b, pad_id),
+                      num_workers=num_workers,
+                      pin_memory=True,
+                      persistent_workers=num_workers > 0)

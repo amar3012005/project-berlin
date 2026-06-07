@@ -69,7 +69,8 @@ def main(cfg_path: str) -> None:
         accel.print("[train] torch.compile enabled")
 
     loader = build_dataloader(dcfg, tok, tcfg.get("per_device_batch_size", 4),
-                              shuffle=not dcfg.get("streaming", False))
+                              shuffle=not dcfg.get("streaming", False),
+                              num_workers=tcfg.get("num_workers", 0))
 
     optim = torch.optim.AdamW(model.parameters(), lr=float(tcfg["lr"]),
                               weight_decay=float(tcfg.get("weight_decay", 0.0)))
@@ -77,11 +78,16 @@ def main(cfg_path: str) -> None:
     max_steps = tcfg.get("max_steps")
     epochs = tcfg.get("epochs", 1)
     warmup = tcfg.get("warmup_steps", 0)
+    total_steps = max_steps or 100000          # cosine horizon
+    min_lr_ratio = float(tcfg.get("min_lr_ratio", 0.1))
 
     def lr_lambda(step):
         if warmup and step < warmup:
             return step / max(1, warmup)
-        return 1.0
+        # cosine decay warmup->total_steps, floor at min_lr_ratio (better convergence)
+        prog = min(1.0, (step - warmup) / max(1, total_steps - warmup))
+        cos = 0.5 * (1.0 + math.cos(math.pi * prog))
+        return min_lr_ratio + (1 - min_lr_ratio) * cos
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda)
 
     model, optim, loader, sched = accel.prepare(model, optim, loader, sched)

@@ -1,0 +1,40 @@
+# Fast real run — EuroLLM-1.7B on 4x A100 80GB FSDP + flash-attn.
+# Accuracy↑ (cosine LR, big batch) + time↓ (4 GPU, FA2, num_workers).
+#   ./start.sh train_multi configs/eurollm_cluster.yaml
+model:
+  name: utter-project/EuroLLM-1.7B
+  block_size: 64
+  attn_implementation: flash_attention_2   # 1.5-2x; falls back to sdpa if unbuilt
+  trust_remote_code: false
+  compile: false                           # off until fixed-length padding lands
+
+data:
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/openlegaldata_de.jsonl
+    - data/wikipedia_de.jsonl
+  text_field: text
+  max_length: 512
+  streaming: false
+
+train:
+  output_dir: checkpoints/eurollm_cluster
+  epochs: 5
+  max_steps: 3000
+  per_device_batch_size: 8       # 80GB A100 fits more
+  grad_accum: 4                  # global batch = 8 * 4 * 4gpu = 128
+  num_workers: 4                 # overlap tokenization with compute
+  lr: 2.0e-5
+  warmup_steps: 150
+  min_lr_ratio: 0.1              # cosine decay floor
+  weight_decay: 0.01
+  t_min: 1.0e-3
+  mask_schedule: uniform
+  grad_clip: 1.0
+  precision: bf16
+  log_every: 10
+  save_every: 1000
+  seed: 0
+  wandb: false
+  wandb_project: project-berlin
