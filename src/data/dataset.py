@@ -60,17 +60,26 @@ class JsonlTextDataset(Dataset):
 class PackedDataset(Dataset):
     """Sequence PACKING: concatenate all docs (eos-separated) and slice into fixed
     `block` chunks. Zero PAD waste, every token trains, STATIC shapes -> unlocks
-    torch.compile + kernel fusion (the recompile-trap fix). Standard in LLaMA/LLaDA."""
-    def __init__(self, paths, text_field, tokenizer, block, weights=None):
+    torch.compile + kernel fusion (the recompile-trap fix). Standard in LLaMA/LLaDA.
+
+    FAST: per-doc truncation cap (avoid pathological huge legal docs) + BATCH
+    tokenization (HF fast tokenizer parallelism) instead of one-doc-at-a-time. The
+    naive untruncated single-doc loop stalled 20min on 65k docs — this is seconds."""
+    def __init__(self, paths, text_field, tokenizer, block, weights=None,
+                 doc_cap_blocks=8, batch_size=1000):
         self.block = block
         eos = tokenizer.eos_token_id
         if eos is None:
             eos = tokenizer.pad_token_id or 0
+        cap = block * doc_cap_blocks                       # cap any single doc
+        docs = _read_lines(paths, text_field, weights)
         stream: list[int] = []
-        for doc in _read_lines(paths, text_field, weights):
-            ids = tokenizer(doc, truncation=False)["input_ids"]
-            stream.extend(ids)
-            stream.append(eos)
+        for i in range(0, len(docs), batch_size):
+            enc = tokenizer(docs[i:i + batch_size], truncation=True,
+                            max_length=cap, add_special_tokens=True)["input_ids"]
+            for ids in enc:
+                stream.extend(ids)
+                stream.append(eos)
         n = (len(stream) // block) * block
         self.data = torch.tensor(stream[:n], dtype=torch.long).view(-1, block)
 
