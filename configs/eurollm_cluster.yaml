@@ -7,6 +7,7 @@ model:
   attn_implementation: sdpa                # sdpa (no flash-attn build needed); FA2 later
   trust_remote_code: false
   compile: true                            # packing => static shapes => compile safe (+15-30%)
+  compile_mode: max-autotune               # best kernels (longer first-step warmup)
 
 data:
   hf_dataset: null
@@ -36,6 +37,9 @@ train:
   mask_block_size: 64            # block-aligned masking (matches attention blocks)
   loss_weight_alpha: 0.3         # smoothed weight w(t)=alpha+(1-alpha)/t
   grad_clip: 1.0
+  nan_loss_threshold: 10000       # skip update if loss non-finite / explodes
+  grad_checkpointing: false       # set true to fit a bigger global batch
+  resume_from: null               # set to checkpoints/eurollm_cluster/resume to resume
   precision: bf16
   log_every: 10
   save_every: 100                # granular checkpoints (every 100 steps)

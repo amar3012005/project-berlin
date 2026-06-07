@@ -63,11 +63,16 @@ def main(cfg_path: str) -> None:
     mask_id = add_mask_token(model, tok)
     accel.print(f"[train] surgery applied, [MASK] id={mask_id}, vocab={len(tok)}")
 
-    # torch.compile — free 10-30% via Triton; only on CUDA (skip CPU/MPS to avoid
-    # long warmup + backend gaps). Eager-mask surgery is compile-compatible.
+    # gradient checkpointing — trade compute for memory => bigger global batch
+    if tcfg.get("grad_checkpointing"):
+        model.gradient_checkpointing_enable()
+        model.config.use_cache = False
+        accel.print("[train] gradient checkpointing ON")
+
+    # torch.compile — packing gives static shapes => safe + max-autotune. CUDA-only.
     if mcfg.get("compile") and torch.cuda.is_available():
-        model = torch.compile(model)
-        accel.print("[train] torch.compile enabled")
+        model = torch.compile(model, mode=mcfg.get("compile_mode", "max-autotune"))
+        accel.print(f"[train] torch.compile ({mcfg.get('compile_mode','max-autotune')})")
 
     loader = build_dataloader(dcfg, tok, tcfg.get("per_device_batch_size", 4),
                               shuffle=not dcfg.get("streaming", False),
@@ -93,12 +98,25 @@ def main(cfg_path: str) -> None:
 
     model, optim, loader, sched = accel.prepare(model, optim, loader, sched)
 
+    out_dir = tcfg["output_dir"]
+    # RESUME: restore model+optim+sched+RNG so a RunPod interruption costs minutes,
+    # not the whole run. accel.save_state/load_state handles all of it.
+    start_step = 0
+    resume_from = tcfg.get("resume_from") or os.environ.get("BERLIN_RESUME")
+    if resume_from and os.path.isdir(resume_from):
+        accel.load_state(resume_from)
+        sf = os.path.join(resume_from, "berlin_step.txt")
+        if os.path.exists(sf):
+            with open(sf) as f:
+                start_step = int(f.read().strip())
+        accel.print(f"[train] RESUMED from {resume_from} at step {start_step}")
+
     model.train()
     t_min = float(tcfg.get("t_min", 1e-3))
     grad_clip = float(tcfg.get("grad_clip", 1.0))
     log_every = tcfg.get("log_every", 20)
     save_every = tcfg.get("save_every", 100)
-    out_dir = tcfg["output_dir"]
+    nan_threshold = float(tcfg.get("nan_loss_threshold", 1e4))
 
     # realtime metrics file consumed by the monitor dashboard (src/monitor)
     import time
@@ -109,9 +127,11 @@ def main(cfg_path: str) -> None:
     seq_len = int(dcfg.get("max_length", 512))
     global_batch = (tcfg.get("per_device_batch_size", 4)
                     * tcfg.get("grad_accum", 1) * accel.num_processes)
+    tokens_per_step = global_batch * seq_len
     t_last = time.time()
 
-    step = 0
+    step = start_step
+    tokens_seen = start_step * tokens_per_step
     done = False
     for epoch in range(epochs):
         if done:
@@ -124,6 +144,12 @@ def main(cfg_path: str) -> None:
                     block_size=tcfg.get("mask_block_size", 0),
                     weight_alpha=float(tcfg.get("loss_weight_alpha", 0.3)),
                     attention_mask=batch.get("attention_mask"))
+                # NaN/explosion guard: skip the update, don't poison the weights
+                if not torch.isfinite(loss) or loss.item() > nan_threshold:
+                    accel.print(f"[train] WARN non-finite/exploding loss "
+                                f"({loss.item():.1f}) at step {step} — skipping update")
+                    optim.zero_grad()
+                    continue
                 accel.backward(loss)
                 if accel.sync_gradients:
                     accel.clip_grad_norm_(model.parameters(), grad_clip)
@@ -133,6 +159,7 @@ def main(cfg_path: str) -> None:
 
             if accel.sync_gradients:
                 step += 1
+                tokens_seen += tokens_per_step
                 if step % log_every == 0:
                     lv = accel.gather(loss.detach()).mean().item()
                     lr = sched.get_last_lr()[0]
@@ -151,6 +178,7 @@ def main(cfg_path: str) -> None:
                             mf.write(json.dumps({
                                 "t": now, "step": step, "epoch": epoch,
                                 "loss": round(lv, 4), "lr": lr,
+                                "tokens_seen": tokens_seen,
                                 "tok_per_sec": round(tok_per_sec, 1),
                                 "steps_per_sec": round(steps_per_sec, 3),
                                 "gpu_gb": round(gpu_gb, 2),
@@ -159,18 +187,18 @@ def main(cfg_path: str) -> None:
                     if tcfg.get("wandb"):
                         accel.log({"loss": lv, "lr": lr}, step=step)
                 if step % save_every == 0:
-                    _save(accel, model, tok, out_dir, step)
+                    _save(accel, model, tok, out_dir, step, train_step=step)
                 if max_steps and step >= max_steps:
                     done = True
                     break
 
-    _save(accel, model, tok, out_dir, step, final=True)
+    _save(accel, model, tok, out_dir, step, final=True, train_step=step)
     if tcfg.get("wandb") and accel.is_main_process:
         accel.end_training()
     accel.print(f"[train] DONE — {step} steps, checkpoints in {out_dir}")
 
 
-def _save(accel, model, tok, out_dir, step, final=False):
+def _save(accel, model, tok, out_dir, step, final=False, train_step=0):
     accel.wait_for_everyone()
     tag = "final" if final else f"step{step}"
     path = os.path.join(out_dir, tag)
@@ -181,7 +209,13 @@ def _save(accel, model, tok, out_dir, step, final=False):
         # save config.json too so the ckpt reloads with AutoModel (save_model omits it)
         unwrapped.config.save_pretrained(path)
     accel.save_model(unwrapped, path)
-    accel.print(f"[train] saved checkpoint -> {path}")
+    # full training state (optim+sched+RNG) for --resume; + step counter
+    resume_dir = os.path.join(out_dir, "resume")
+    accel.save_state(resume_dir)
+    if accel.is_main_process:
+        with open(os.path.join(resume_dir, "berlin_step.txt"), "w") as f:
+            f.write(str(train_step))
+    accel.print(f"[train] saved checkpoint -> {path} (+resume state)")
 
 
 if __name__ == "__main__":
