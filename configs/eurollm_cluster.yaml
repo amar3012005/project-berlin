@@ -5,7 +5,7 @@ model:
   block_size: 64
   attn_implementation: sdpa
   trust_remote_code: false
-  compile: false                           # OFF for robustness (compile+grad-ckpt mem spikes)
+  compile: true                            # +20-30%
   compile_mode: default
 
 data:
@@ -24,8 +24,8 @@ train:
   output_dir: checkpoints/eurollm_cluster
   epochs: 50
   max_steps: 3000
-  per_device_batch_size: 60      # batch 60 @ seq512 + grad-ckpt => ~50-70GB (SAFE, ~35%)
-  grad_accum: 2                  # global batch = 60 * 2 = 120 seqs * 512 = ~61k tokens/step
+  per_device_batch_size: 32      # fast-demo: small step => step counter flies
+  grad_accum: 1                  # 32*512=16k tok/step, ~0.2-0.3s/step
   num_workers: 8                 # 24 vCPU => feed the GPU
   lr: 2.0e-5
   warmup_steps: 100
@@ -37,7 +37,7 @@ train:
   loss_weight_alpha: 0.3
   grad_clip: 1.0
   nan_loss_threshold: 10000
-  grad_checkpointing: true        # recompute activations => big batch fits, no OOM
+  grad_checkpointing: false       # OFF = ~2x faster (fits ~40GB at batch32/seq512)
   resume_from: null
   precision: bf16
   log_every: 10
