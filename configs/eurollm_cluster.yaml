@@ -5,8 +5,8 @@ model:
   block_size: 64
   attn_implementation: sdpa
   trust_remote_code: false
-  compile: true                            # packing => static shapes => compile safe
-  compile_mode: default                    # reliable fast warmup (max-autotune risky on B200)
+  compile: false                           # OFF for robustness (compile+grad-ckpt mem spikes)
+  compile_mode: default
 
 data:
   hf_dataset: null
@@ -24,8 +24,8 @@ train:
   output_dir: checkpoints/eurollm_cluster
   epochs: 50
   max_steps: 3000
-  per_device_batch_size: 24      # batch48 OOM'd at seq1024; 24 + grad-ckpt fits safely
-  grad_accum: 4                  # global batch = 24 * 4 = 96 seqs * 1024 = ~98k tokens/step
+  per_device_batch_size: 16      # SAFE ~60-70% VRAM (not greedy 92% => no frag-OOM)
+  grad_accum: 6                  # global batch = 16 * 6 = 96 seqs * 1024 = ~98k tokens/step
   num_workers: 8                 # 24 vCPU => feed the GPU
   lr: 2.0e-5
   warmup_steps: 100
