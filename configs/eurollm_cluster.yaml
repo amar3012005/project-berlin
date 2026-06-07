@@ -24,8 +24,8 @@ train:
   output_dir: checkpoints/eurollm_cluster
   epochs: 50
   max_steps: 3000
-  per_device_batch_size: 48      # fill the 183GB B200 (was 8 => 16% VRAM)
-  grad_accum: 2                  # global batch = 48 * 2 = 96 seqs * 1024 = ~98k tokens/step
+  per_device_batch_size: 24      # batch48 OOM'd at seq1024; 24 + grad-ckpt fits safely
+  grad_accum: 4                  # global batch = 24 * 4 = 96 seqs * 1024 = ~98k tokens/step
   num_workers: 8                 # 24 vCPU => feed the GPU
   lr: 2.0e-5
   warmup_steps: 100
@@ -37,7 +37,7 @@ train:
   loss_weight_alpha: 0.3
   grad_clip: 1.0
   nan_loss_threshold: 10000
-  grad_checkpointing: false
+  grad_checkpointing: true        # recompute activations => big batch fits, no OOM
   resume_from: null
   precision: bf16
   log_every: 10
