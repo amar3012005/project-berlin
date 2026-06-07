@@ -16,7 +16,7 @@ data:
     - data/wikipedia_de.jsonl
   corpus_weights: [1.5, 1.0]
   text_field: text
-  max_length: 1024               # longer context (B200 has VRAM to spare)
+  max_length: 512                # seq 512 keeps logits tensor small => batch 60 fits safely
   pack: true                     # packing => GPU never data-starves
   streaming: false
 
@@ -24,8 +24,8 @@ train:
   output_dir: checkpoints/eurollm_cluster
   epochs: 50
   max_steps: 3000
-  per_device_batch_size: 16      # SAFE ~60-70% VRAM (not greedy 92% => no frag-OOM)
-  grad_accum: 6                  # global batch = 16 * 6 = 96 seqs * 1024 = ~98k tokens/step
+  per_device_batch_size: 60      # batch 60 @ seq512 + grad-ckpt => ~50-70GB (SAFE, ~35%)
+  grad_accum: 2                  # global batch = 60 * 2 = 120 seqs * 512 = ~61k tokens/step
   num_workers: 8                 # 24 vCPU => feed the GPU
   lr: 2.0e-5
   warmup_steps: 100

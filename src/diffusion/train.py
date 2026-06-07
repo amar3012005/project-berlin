@@ -137,25 +137,34 @@ def main(cfg_path: str) -> None:
         if done:
             break
         for batch in loader:
-            with accel.accumulate(model):
-                loss, _ = denoise_loss(
-                    model, batch["input_ids"], mask_id, t_min=t_min,
-                    schedule=tcfg.get("mask_schedule", "uniform"),
-                    block_size=tcfg.get("mask_block_size", 0),
-                    weight_alpha=float(tcfg.get("loss_weight_alpha", 0.3)),
-                    attention_mask=batch.get("attention_mask"))
-                # NaN/explosion guard: skip the update, don't poison the weights
-                if not torch.isfinite(loss) or loss.item() > nan_threshold:
-                    accel.print(f"[train] WARN non-finite/exploding loss "
-                                f"({loss.item():.1f}) at step {step} — skipping update")
+            try:
+                with accel.accumulate(model):
+                    loss, _ = denoise_loss(
+                        model, batch["input_ids"], mask_id, t_min=t_min,
+                        schedule=tcfg.get("mask_schedule", "uniform"),
+                        block_size=tcfg.get("mask_block_size", 0),
+                        weight_alpha=float(tcfg.get("loss_weight_alpha", 0.3)),
+                        attention_mask=batch.get("attention_mask"))
+                    # NaN/explosion guard: skip the update, don't poison the weights
+                    if not torch.isfinite(loss) or loss.item() > nan_threshold:
+                        accel.print(f"[train] WARN non-finite/exploding loss "
+                                    f"({loss.item():.1f}) at step {step} — skipping")
+                        optim.zero_grad(set_to_none=True)
+                        continue
+                    accel.backward(loss)
+                    if accel.sync_gradients:
+                        accel.clip_grad_norm_(model.parameters(), grad_clip)
+                    optim.step()
+                    sched.step()
                     optim.zero_grad()
-                    continue
-                accel.backward(loss)
-                if accel.sync_gradients:
-                    accel.clip_grad_norm_(model.parameters(), grad_clip)
-                optim.step()
-                sched.step()
-                optim.zero_grad()
+            except torch.cuda.OutOfMemoryError:
+                # OOM-RESILIENT: free + skip this batch instead of hard-crashing
+                # (a hard crash leaves a zombie CUDA ctx that poisons the GPU).
+                accel.print(f"[train] OOM at step {step} — freeing + skipping batch")
+                optim.zero_grad(set_to_none=True)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
 
             if accel.sync_gradients:
                 step += 1
