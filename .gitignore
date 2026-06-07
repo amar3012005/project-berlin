@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+checkpoints/
+wandb/
+.DS_Store
+data/*.jsonl
+!data/sample_de.jsonl

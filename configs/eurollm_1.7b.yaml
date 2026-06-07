@@ -1,0 +1,39 @@
+# SLM config — EuroLLM-1.7B: UNGATED, Apache 2.0, EU-sovereign, llama-arch.
+# Runs immediately (no HF gate). Sweet spot: real German quality, cheap surgery
+# (~1x A100, hours, ~$50-300). Same code as Pharia — only model.name differs.
+#   single GPU: ./start.sh train configs/eurollm_1.7b.yaml
+#   8-GPU FSDP: ./start.sh train_multi configs/eurollm_1.7b.yaml
+model:
+  name: utter-project/EuroLLM-1.7B   # llama-arch -> generic create_causal_mask surgery works
+  block_size: 64
+  attn_implementation: sdpa          # flash_attention_2 if flash-attn installed
+  trust_remote_code: false
+
+data:
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/openlegaldata_de.jsonl
+    - data/din_vde_scrapes.jsonl
+  text_field: text
+  max_length: 1024
+  streaming: true
+
+train:
+  output_dir: checkpoints/eurollm_1.7b
+  epochs: 100
+  max_steps: null
+  per_device_batch_size: 4           # 1.7B fits comfortably on A100 80GB
+  grad_accum: 8                      # global batch = 4 * 8 * ngpu
+  lr: 1.0e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  t_min: 1.0e-3
+  mask_schedule: uniform
+  grad_clip: 1.0
+  precision: bf16
+  log_every: 10
+  save_every: 500
+  seed: 0
+  wandb: true
+  wandb_project: project-berlin
