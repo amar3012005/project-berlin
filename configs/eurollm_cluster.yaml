@@ -4,7 +4,7 @@
 model:
   name: utter-project/EuroLLM-1.7B
   block_size: 64
-  attn_implementation: flash_attention_2   # 1.5-2x; falls back to sdpa if unbuilt
+  attn_implementation: sdpa                # sdpa (no flash-attn build needed); FA2 later
   trust_remote_code: false
   compile: false                           # off until fixed-length padding lands
 
