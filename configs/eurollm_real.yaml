@@ -1,0 +1,38 @@
+# Real-corpora EuroLLM-1.7B discrete-diffusion run — German legal + technical.
+# Corpora built by src/data/fetch_corpus.py (see commands in that file).
+#   ./start.sh train configs/eurollm_real.yaml
+model:
+  name: utter-project/EuroLLM-1.7B
+  block_size: 64
+  attn_implementation: sdpa
+  trust_remote_code: false
+  compile: true                    # torch.compile perf (CUDA only)
+
+data:
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/openlegaldata_de.jsonl  # German court rulings (public domain)
+    - data/wikipedia_de.jsonl      # German technical/encyclopedic register
+  text_field: text
+  max_length: 512
+  streaming: false
+
+train:
+  output_dir: checkpoints/eurollm_real
+  epochs: 3
+  max_steps: 2000                  # ~real run; raise for full convergence
+  per_device_batch_size: 4
+  grad_accum: 8                    # global batch = 32
+  lr: 1.0e-5
+  warmup_steps: 100
+  weight_decay: 0.01
+  t_min: 1.0e-3
+  mask_schedule: uniform
+  grad_clip: 1.0
+  precision: bf16
+  log_every: 25
+  save_every: 500
+  seed: 0
+  wandb: false
+  wandb_project: project-berlin
