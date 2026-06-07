@@ -17,10 +17,27 @@ scrape them. Court decisions + Wikipedia give legal + technical German register.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import re
 
 from datasets import load_dataset
+
+_TAG = re.compile(r"<[^>]+>")
+_WS = re.compile(r"[ \t]+")
+_NL = re.compile(r"\n{3,}")
+
+
+def clean_html(text: str) -> str:
+    """Strip HTML tags + unescape entities (OpenLegalData rulings are HTML)."""
+    if "<" not in text:
+        return text
+    text = _TAG.sub(" ", text)
+    text = html.unescape(text)
+    text = _WS.sub(" ", text)
+    text = _NL.sub("\n\n", text)
+    return text.strip()
 
 # candidate text fields tried in order when --text_field not given
 TEXT_FIELDS = ["text", "content", "decision_text", "body",
@@ -30,13 +47,13 @@ TEXT_FIELDS = ["text", "content", "decision_text", "body",
 def pick_text(example: dict, explicit: str | None) -> str | None:
     if explicit:
         v = example.get(explicit)
-        return v if isinstance(v, str) and v.strip() else None
+        return clean_html(v) if isinstance(v, str) and v.strip() else None
     parts = []
     for f in TEXT_FIELDS:
         v = example.get(f)
         if isinstance(v, str) and v.strip():
             parts.append(v.strip())
-    return "\n".join(parts) if parts else None
+    return clean_html("\n".join(parts)) if parts else None
 
 
 def main() -> None:
