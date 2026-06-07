@@ -99,6 +99,17 @@ def main(cfg_path: str) -> None:
     save_every = tcfg.get("save_every", 100)
     out_dir = tcfg["output_dir"]
 
+    # realtime metrics file consumed by the monitor dashboard (src/monitor)
+    import time
+    metrics_path = os.path.join(out_dir, "metrics.jsonl")
+    if accel.is_main_process:
+        os.makedirs(out_dir, exist_ok=True)
+        open(metrics_path, "w").close()                  # reset each run
+    seq_len = int(dcfg.get("max_length", 512))
+    global_batch = (tcfg.get("per_device_batch_size", 4)
+                    * tcfg.get("grad_accum", 1) * accel.num_processes)
+    t_last = time.time()
+
     step = 0
     done = False
     for epoch in range(epochs):
@@ -118,10 +129,29 @@ def main(cfg_path: str) -> None:
                 step += 1
                 if step % log_every == 0:
                     lv = accel.gather(loss.detach()).mean().item()
+                    lr = sched.get_last_lr()[0]
+                    now = time.time()
+                    dt = max(now - t_last, 1e-6)
+                    steps_per_sec = log_every / dt
+                    tok_per_sec = steps_per_sec * global_batch * seq_len
+                    t_last = now
                     accel.print(f"[train] epoch {epoch} step {step:5d} "
-                                f"loss={lv:.4f} lr={sched.get_last_lr()[0]:.2e}")
+                                f"loss={lv:.4f} lr={lr:.2e} "
+                                f"{tok_per_sec/1e3:.1f}k tok/s")
+                    if accel.is_main_process:
+                        gpu_gb = (torch.cuda.max_memory_allocated() / 1e9
+                                  if torch.cuda.is_available() else 0.0)
+                        with open(metrics_path, "a") as mf:
+                            mf.write(json.dumps({
+                                "t": now, "step": step, "epoch": epoch,
+                                "loss": round(lv, 4), "lr": lr,
+                                "tok_per_sec": round(tok_per_sec, 1),
+                                "steps_per_sec": round(steps_per_sec, 3),
+                                "gpu_gb": round(gpu_gb, 2),
+                                "max_steps": max_steps or 0,
+                            }) + "\n")
                     if tcfg.get("wandb"):
-                        accel.log({"loss": lv, "lr": sched.get_last_lr()[0]}, step=step)
+                        accel.log({"loss": lv, "lr": lr}, step=step)
                 if step % save_every == 0:
                     _save(accel, model, tok, out_dir, step)
                 if max_steps and step >= max_steps:

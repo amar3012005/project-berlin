@@ -37,6 +37,16 @@ python src/diffusion/infer.py --base <user>/project-berlin-eurollm-de \
     --gen_len 40 --steps 16 --show_steps
 ```
 
+## Realtime training dashboard (browser)
+train.py writes `checkpoints/<run>/metrics.jsonl` live. Serve the dashboard:
+```bash
+# on the pod (port 8888 already exposed as http)
+python src/monitor/server.py --metrics checkpoints/eurollm_cluster/metrics.jsonl --port 8888 &
+```
+Open the RunPod proxy URL `https://<podid>-8888.proxy.runpod.net` — live loss / LR /
+tokens-per-sec / GPU-mem charts, auto-refresh 2s. Locally: SSH-tunnel `-L 8888:localhost:8888`
+then http://localhost:8888.
+
 ## Serverless (inference endpoint)
 RunPod Serverless: wrap `infer.py:generate` in a handler, deploy as endpoint, scales to
 zero. Use for the diffusion-reveal API. See https://docs.runpod.io/serverless/overview

@@ -20,8 +20,9 @@ case "$cmd" in
 
   # --- real training ---
   train)        python src/diffusion/train.py "$cfg" ;;                 # single device
-  train_multi)  accelerate launch --config_file configs/accelerate_fsdp.yaml \
-                  src/diffusion/train.py "$cfg" ;;                       # 8-GPU FSDP
+  train_multi)  accelerate launch --config_file configs/accelerate_ddp.yaml \
+                  src/diffusion/train.py "$cfg" ;;                       # multi-GPU DDP
+  monitor)      python src/monitor/server.py --metrics "${2:-checkpoints/eurollm_cluster/metrics.jsonl}" --port "${3:-8888}" ;;
 
   *) cat <<EOF
 usage: ./start.sh <cmd> [config.yaml]
