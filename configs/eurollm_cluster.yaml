@@ -34,7 +34,7 @@ train:
   grad_clip: 1.0
   precision: bf16
   log_every: 10
-  save_every: 1000
+  save_every: 100                # granular checkpoints (every 100 steps)
   seed: 0
   wandb: false
   wandb_project: project-berlin
