@@ -1,0 +1,12 @@
+# Multi-GPU DDP launch — correct for models that fit one GPU (EuroLLM-1.7B << 80GB).
+# Full model replicated per GPU, data split across them, gradients all-reduced.
+# No sharding overhead/hangs (FSDP is only needed when a model won't fit one GPU).
+#   accelerate launch --config_file configs/accelerate_ddp.yaml src/diffusion/train.py <cfg>
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2                 # = number of GPUs
+rdzv_backend: static
+same_network: true
+downcast_bf16: true
