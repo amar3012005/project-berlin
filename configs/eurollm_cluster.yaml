@@ -1,13 +1,12 @@
-# Fast real run — EuroLLM-1.7B on 4x A100 80GB FSDP + flash-attn.
-# Accuracy↑ (cosine LR, big batch) + time↓ (4 GPU, FA2, num_workers).
-#   ./start.sh train_multi configs/eurollm_cluster.yaml
+# Max-power B200 run — warm-start from Thunder step1000 weights, fill the GPU.
+#   python src/diffusion/train.py configs/eurollm_cluster.yaml   (single B200)
 model:
-  name: utter-project/EuroLLM-1.7B
+  name: amar3012005/project-berlin-eurollm-de   # WARM-START: trained step1000 weights (HF, private)
   block_size: 64
-  attn_implementation: sdpa                # sdpa (no flash-attn build needed); FA2 later
+  attn_implementation: sdpa
   trust_remote_code: false
-  compile: true                            # packing => static shapes => compile safe (+15-30%)
-  compile_mode: max-autotune               # best kernels (longer first-step warmup)
+  compile: true                            # packing => static shapes => compile safe
+  compile_mode: default                    # reliable fast warmup (max-autotune risky on B200)
 
 data:
   hf_dataset: null
@@ -15,34 +14,34 @@ data:
   jsonl_paths:
     - data/openlegaldata_de.jsonl
     - data/wikipedia_de.jsonl
-  corpus_weights: [1.5, 1.0]     # register balance: upweight legal (fewer docs)
+  corpus_weights: [1.5, 1.0]
   text_field: text
-  max_length: 512
-  pack: true                     # sequence packing — no PAD waste, static shapes
+  max_length: 1024               # longer context (B200 has VRAM to spare)
+  pack: true                     # packing => GPU never data-starves
   streaming: false
 
 train:
   output_dir: checkpoints/eurollm_cluster
-  epochs: 5
+  epochs: 50
   max_steps: 3000
-  per_device_batch_size: 8       # 80GB A100 fits more
-  grad_accum: 4                  # global batch = 8 * 4 * 4gpu = 128
-  num_workers: 4                 # overlap tokenization with compute
+  per_device_batch_size: 48      # fill the 183GB B200 (was 8 => 16% VRAM)
+  grad_accum: 2                  # global batch = 48 * 2 = 96 seqs * 1024 = ~98k tokens/step
+  num_workers: 8                 # 24 vCPU => feed the GPU
   lr: 2.0e-5
-  warmup_steps: 150
-  min_lr_ratio: 0.1              # cosine decay floor
+  warmup_steps: 100
+  min_lr_ratio: 0.1
   weight_decay: 0.01
-  t_min: 0.05                    # clamp low-t (tames 1/t loss variance)
-  mask_schedule: beta            # non-uniform, skewed-low (Dream-7B/CART)
-  mask_block_size: 64            # block-aligned masking (matches attention blocks)
-  loss_weight_alpha: 0.3         # smoothed weight w(t)=alpha+(1-alpha)/t
+  t_min: 0.05
+  mask_schedule: beta
+  mask_block_size: 64
+  loss_weight_alpha: 0.3
   grad_clip: 1.0
-  nan_loss_threshold: 10000       # skip update if loss non-finite / explodes
-  grad_checkpointing: false       # set true to fit a bigger global batch
-  resume_from: null               # set to checkpoints/eurollm_cluster/resume to resume
+  nan_loss_threshold: 10000
+  grad_checkpointing: false
+  resume_from: null
   precision: bf16
   log_every: 10
-  save_every: 100                # granular checkpoints (every 100 steps)
+  save_every: 100
   seed: 0
   wandb: false
   wandb_project: project-berlin
