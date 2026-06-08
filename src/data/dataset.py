@@ -7,6 +7,7 @@ DIN/VDE scrapes) — controlled entirely by the YAML `data:` block.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -82,17 +83,23 @@ class PackedDataset(Dataset):
             self.data = torch.load(cache)
             print(f"[pack] loaded cached packed data {tuple(self.data.shape)} <- {cache}")
             return
+        import numpy as np
         cap = block * doc_cap_blocks                       # cap any single doc
         docs = _read_lines(paths, text_field, weights)
-        stream: list[int] = []
+        # FAST: collect per-batch numpy arrays + ONE concatenate at the end.
+        # (python list.extend over 25M+ ints was the ~12min stall.)
+        chunks = []
         for i in range(0, len(docs), batch_size):
             enc = tokenizer(docs[i:i + batch_size], truncation=True,
                             max_length=cap, add_special_tokens=True)["input_ids"]
             for ids in enc:
-                stream.extend(ids)
-                stream.append(eos)
-        n = (len(stream) // block) * block
-        self.data = torch.tensor(stream[:n], dtype=torch.long).view(-1, block)
+                chunks.append(np.asarray(ids, dtype=np.int64))
+                chunks.append(np.asarray([eos], dtype=np.int64))
+            if (i // batch_size) % 20 == 0:
+                print(f"[pack] tokenized {min(i+batch_size,len(docs))}/{len(docs)} docs", flush=True)
+        stream = np.concatenate(chunks)
+        n = (stream.shape[0] // block) * block
+        self.data = torch.from_numpy(stream[:n].reshape(-1, block).copy())
         torch.save(self.data, cache)
         print(f"[pack] built + cached packed data {tuple(self.data.shape)} -> {cache}")
 
