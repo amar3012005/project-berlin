@@ -99,17 +99,34 @@ def main(cfg_path: str) -> None:
     model, optim, loader, sched = accel.prepare(model, optim, loader, sched)
 
     out_dir = tcfg["output_dir"]
-    # RESUME: restore model+optim+sched+RNG so a RunPod interruption costs minutes,
-    # not the whole run. accel.save_state/load_state handles all of it.
+    # RESUME (robust, weights-only): accel.load_state was crash-looping (looks for
+    # pytorch_model.bin that save_state doesn't write). Instead reload the latest
+    # step checkpoint's model.safetensors (the same proven warm-start path) + step
+    # counter. We lose optimizer momentum across a resume — acceptable; the run
+    # survives restarts instead of crash-looping, which is what actually matters.
     start_step = 0
     resume_from = tcfg.get("resume_from") or os.environ.get("BERLIN_RESUME")
     if resume_from and os.path.isdir(resume_from):
-        accel.load_state(resume_from)
-        sf = os.path.join(resume_from, "berlin_step.txt")
-        if os.path.exists(sf):
-            with open(sf) as f:
-                start_step = int(f.read().strip())
-        accel.print(f"[train] RESUMED from {resume_from} at step {start_step}")
+        import glob as _glob
+        from safetensors.torch import load_file as _load_file
+        shards = sorted(_glob.glob(os.path.join(resume_from, "*.safetensors")))
+        if shards:
+            state = {}
+            for s in shards:
+                state.update(_load_file(s))
+            state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+            tgt = accel.unwrap_model(model)
+            if hasattr(tgt, "_orig_mod"):
+                tgt = tgt._orig_mod
+            missing, _ = tgt.load_state_dict(state, strict=False)
+            sf = os.path.join(resume_from, "berlin_step.txt")
+            if os.path.exists(sf):
+                with open(sf) as f:
+                    start_step = int(f.read().strip())
+            accel.print(f"[train] RESUMED weights from {resume_from} at step "
+                        f"{start_step} (missing={len(missing)})")
+        else:
+            accel.print(f"[train] resume dir {resume_from} has no safetensors — fresh start")
 
     model.train()
     t_min = float(tcfg.get("t_min", 1e-3))
@@ -222,13 +239,15 @@ def _save(accel, model, tok, out_dir, step, final=False, train_step=0):
         # save config.json too so the ckpt reloads with AutoModel (save_model omits it)
         unwrapped.config.save_pretrained(path)
     accel.save_model(unwrapped, path)
-    # full training state (optim+sched+RNG) for --resume; + step counter
-    resume_dir = os.path.join(out_dir, "resume")
-    accel.save_state(resume_dir)
     if accel.is_main_process:
-        with open(os.path.join(resume_dir, "berlin_step.txt"), "w") as f:
+        # step counter IN the checkpoint dir; this dir IS the resume point
+        # (weights-only resume — no accel.save_state, which crash-looped on load).
+        with open(os.path.join(path, "berlin_step.txt"), "w") as f:
             f.write(str(train_step))
-    accel.print(f"[train] saved checkpoint -> {path} (+resume state)")
+        # 'latest' pointer for go.sh to resume from
+        with open(os.path.join(out_dir, "LATEST"), "w") as f:
+            f.write(path)
+    accel.print(f"[train] saved checkpoint -> {path}")
 
 
 if __name__ == "__main__":
