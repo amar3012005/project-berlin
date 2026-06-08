@@ -37,7 +37,7 @@ train:
   loss_weight_alpha: 0.3
   grad_clip: 1.0
   nan_loss_threshold: 10000
-  grad_checkpointing: true        # fit 48GB A6000
+  grad_checkpointing: false       # SUSPECTED HANG TRIGGER (grad-ckpt+eager-mask); batch8 fits 48GB without it
   resume_from: null
   precision: bf16
   log_every: 20
