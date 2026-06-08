@@ -73,6 +73,12 @@ DEFAULT_BASE = "Qwen/Qwen2.5-0.5B"
 MAX_STEP_EVENTS = 80
 BERLIN_MAX_STEP_EVENTS = 120
 
+# Longer-answer bounds. The answer (gen_len) may now run up to ~512 tokens so
+# multi-turn replies aren't truncated, with a hard safety ceiling above that to
+# avoid OOM / pathological loops. Denoising steps scale up the same way.
+GEN_LEN_SAFETY_MAX = 768  # absolute ceiling we will never exceed for gen_len
+STEPS_MAX = 512           # allow ~one-token-per-step reveals for long answers
+
 # Where trained berlin checkpoints live (stepN dirs written by src/diffusion/train.py).
 BERLIN_CKPT_ROOT = "checkpoints/qwen_long"
 
@@ -257,8 +263,14 @@ class BerlinBackend:
         return self.torch.no_grad
 
     def generate_stream(self, prompt: str, gen_len: int, steps: int,
-                        block_size: int, temperature: float):
+                        block_size: int, temperature: float,
+                        messages: list | None = None):
         """Yield (kind, payload_dict) tuples. kind in {"step", "done"}.
+
+        berlin (our Qwen base, NOT instruct, no real chat template) stays
+        SINGLE-TURN: if a `messages` history is supplied we use only the latest
+        user turn's content as the raw prompt; otherwise the `prompt` string is
+        used as-is. This keeps berlin behaviour identical to before.
 
         Reuses the EXACT cosine-schedule confidence-ordered parallel-unmask loop
         from src/diffusion/generate.py, but yields the partial sequence each step
@@ -275,6 +287,16 @@ class BerlinBackend:
         import torch.nn.functional as F  # noqa: N812
 
         model, tok, mask_id, device = self.model, self.tok, self.mask_id, self.device
+
+        # berlin is single-turn: if a conversation history came in, use ONLY the
+        # latest user turn's content as the raw prompt (no chat template).
+        if messages:
+            latest_user = next(
+                (m.get("content", "") for m in reversed(messages)
+                 if isinstance(m, dict) and str(m.get("role", "")).lower() == "user"),
+                None)
+            if latest_user is not None:
+                prompt = str(latest_user)
 
         # single global block iff the caller asked for a block >= the gen region.
         single_block = block_size >= gen_len
@@ -417,30 +439,93 @@ class LladaBackend:
     def health_model(self) -> str:
         return self.model_name
 
-    def _build_prompt_ids(self, prompt: str):
-        """Apply the LLaDA-Instruct chat template, fall back to raw encode."""
-        torch = self.torch
+    def _build_prompt_ids(self, prompt: str, messages: list | None,
+                          gen_len: int):
+        """Build LLaDA-Instruct prompt ids from a FULL conversation.
+
+        Multi-turn: `messages` is the ordered chat history
+        [{"role": "user"|"assistant"|"system", "content": str}, ...] (oldest
+        first, last item is the new user turn). We render it with the model's
+        chat template (LLaDA-8B-Instruct ships one) and add the generation
+        prompt so the model continues as the assistant.
+
+        Single-turn back-compat: when `messages` is empty we wrap the raw
+        `prompt` as a single user turn.
+
+        CONTEXT GUARD: if the templated prompt + gen_len would exceed the
+        model's max positions we drop the OLDEST non-system messages (keeping
+        any leading system turn + the most-recent turns) and re-render until it
+        fits, so the answer region always has room."""
         tok = self.tok
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            text = tok.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False)
-            ids = tok(text, return_tensors="pt")["input_ids"]
-        except Exception:
-            ids = tok(prompt, return_tensors="pt")["input_ids"]
+
+        msgs = self._normalize_messages(prompt, messages)
+        budget = max(1, self._max_positions() - gen_len)
+
+        # split off a leading system message (always kept) from the rest.
+        system_msgs = msgs[:1] if (msgs and msgs[0].get("role") == "system") else []
+        body = msgs[len(system_msgs):]
+
+        def encode(rendered_msgs):
+            try:
+                text = tok.apply_chat_template(
+                    rendered_msgs, add_generation_prompt=True, tokenize=False)
+                return tok(text, return_tensors="pt")["input_ids"]
+            except Exception:
+                # no/broken chat template -> concatenate raw contents.
+                raw = "\n".join(m.get("content", "") for m in rendered_msgs)
+                return tok(raw, return_tensors="pt")["input_ids"]
+
+        ids = encode(system_msgs + body)
+        # trim oldest body turns (keep system + most-recent) until it fits.
+        while ids.shape[1] > budget and len(body) > 1:
+            body = body[1:]
+            ids = encode(system_msgs + body)
+
         return ids.to(self.device)
 
+    def _max_positions(self) -> int:
+        """Best-effort model max sequence length (LLaDA-8B-Instruct = 4096)."""
+        cfg = getattr(self.model, "config", None)
+        for attr in ("max_position_embeddings", "model_max_length",
+                     "max_sequence_length", "n_positions"):
+            val = getattr(cfg, attr, None) if cfg is not None else None
+            if isinstance(val, int) and 0 < val < 1_000_000:
+                return val
+        return 4096
+
+    @staticmethod
+    def _normalize_messages(prompt: str, messages: list | None) -> list:
+        """Coerce a request into a clean ordered [{role, content}] list. Falls
+        back to a single user turn from `prompt` when no messages were sent."""
+        out: list = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role", "")).strip().lower()
+            content = m.get("content", "")
+            if role not in ("user", "assistant", "system") or content is None:
+                continue
+            out.append({"role": role, "content": str(content)})
+        if not out:
+            out = [{"role": "user", "content": str(prompt)}]
+        return out
+
     def generate_stream(self, prompt: str, gen_len: int, steps: int,
-                        block_size: int, temperature: float):
+                        block_size: int, temperature: float,
+                        messages: list | None = None):
         """Official LLaDA low-confidence semi-autoregressive remasking, yielding
-        the partial decode of the answer region each step."""
+        the partial decode of the answer region each step.
+
+        Multi-turn aware: when `messages` is provided the model prompt is built
+        from the FULL conversation via the chat template; the streamed `text`
+        is ONLY the new assistant answer (history is the prompt, not decoded)."""
         torch = self.torch
         import torch.nn.functional as F  # noqa: N812
 
         model, tok, mask_id, device = self.model, self.tok, self.mask_id, self.device
 
         with torch.no_grad():
-            prompt_ids = self._build_prompt_ids(prompt)
+            prompt_ids = self._build_prompt_ids(prompt, messages, gen_len)
             p = prompt_ids.shape[1]
             total = p + gen_len
 
@@ -624,6 +709,18 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         prompt = str(req.get("prompt", ""))
+
+        # MULTI-TURN: optional ordered conversation history (oldest first, the
+        # last item is the new user turn). BACKWARD COMPAT: if absent, the
+        # single-turn `prompt` is wrapped as one user message downstream.
+        messages = req.get("messages")
+        if messages is not None and not isinstance(messages, list):
+            self._send_json(400, {"type": "error",
+                                  "message": "messages must be a list"})
+            return
+        if not messages and prompt:
+            messages = [{"role": "user", "content": prompt}]
+
         try:
             gen_len = int(req.get("gen_len", 128))
             steps = int(req.get("steps", 128))
@@ -633,9 +730,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"type": "error", "message": f"bad params: {e}"})
             return
 
-        # clamp to sane bounds (avoid OOM / pathological loops)
-        gen_len = max(1, min(gen_len, 1024))
-        steps = max(1, min(steps, 1024))
+        # clamp to sane bounds (avoid OOM / pathological loops). Answers may now
+        # run up to ~512 tokens (hard ceiling GEN_LEN_SAFETY_MAX); steps scale to
+        # STEPS_MAX so long answers still reveal ~one token per step.
+        gen_len = max(1, min(gen_len, GEN_LEN_SAFETY_MAX))
+        steps = max(1, min(steps, STEPS_MAX))
         block_size = max(1, min(block_size, gen_len))
         temperature = max(0.0, min(temperature, 5.0))
 
@@ -672,7 +771,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             for kind, payload in backend.generate_stream(
                     prompt=prompt, gen_len=gen_len, steps=steps,
-                    block_size=block_size, temperature=temperature):
+                    block_size=block_size, temperature=temperature,
+                    messages=messages):
                 sse(payload)
                 if kind == "done":
                     break

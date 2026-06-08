@@ -545,6 +545,11 @@
       <span class="model-pill loading" id="modelPill" title="Active model">
         <span class="dot"></span><span id="modelName">checking…</span>
       </span>
+      <button class="icon-btn" id="newChatBtn" title="New chat" aria-label="New chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
       <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -609,15 +614,15 @@
 
     <!-- Generation length is always active (global mode derives steps & block from it). -->
     <div class="field">
-      <div class="field-head"><label for="r_genlen">Generation length</label><span class="val" id="v_genlen">128</span></div>
-      <input type="range" id="r_genlen" min="32" max="256" step="1" value="128" />
+      <div class="field-head"><label for="r_genlen">Generation length (max tokens)</label><span class="val" id="v_genlen">256</span></div>
+      <input type="range" id="r_genlen" min="32" max="512" step="16" value="256" />
     </div>
 
     <!-- These are overridden while Global denoise is ON. -->
     <div class="manual-fields" id="manualFields">
       <div class="field">
-        <div class="field-head"><label for="r_steps">Denoising steps</label><span class="val" id="v_steps">128</span></div>
-        <input type="range" id="r_steps" min="16" max="256" step="1" value="128" />
+        <div class="field-head"><label for="r_steps">Denoising steps</label><span class="val" id="v_steps">256</span></div>
+        <input type="range" id="r_steps" min="16" max="512" step="1" value="256" />
       </div>
 
       <div class="field">
@@ -643,7 +648,7 @@
 
     <div class="pop-foot">
       <button class="reset-link" id="resetSettings">Reset to defaults</button>
-      <span style="font-size:11px;color:var(--text-mute)">default: global denoise ON · gen_len=128</span>
+      <span style="font-size:11px;color:var(--text-mute)" id="defaultsNote">defaults adapt to the active model</span>
     </div>
   </div>
 
@@ -652,8 +657,23 @@
 (function () {
   // ---------------- Constants & contract ----------------
   const MASK_CHAR = "▒"; // ▒  (must match the server's mask token)
-  const DEFAULTS = { steps: 128, gen_len: 128, block_size: 32, temperature: 0.3, backend: "", global_denoise: true };
-  const LS_KEY = "berlin.diffchat.settings.v2";
+  // Longer answers by default (256-token gen_len). global_denoise default is
+  // model-aware and resolved later from /api/health (see applyModelDefaults):
+  //   • llada  -> OFF (semi-AR, block_size 32) so long multi-turn stays coherent
+  //   • berlin -> ON  (single dramatic global-denoise block)
+  const DEFAULTS = { steps: 256, gen_len: 256, block_size: 32, temperature: 0.3, backend: "", global_denoise: true };
+  const LS_KEY = "berlin.diffchat.settings.v3";
+
+  // Multi-turn conversation state. Each entry: {role:"user"|"assistant", content}.
+  // Sent in full as `messages` on every POST so follow-ups carry prior context.
+  let conversation = [];
+
+  // Whether the user has explicitly toggled global-denoise this session. While
+  // false we let model-aware defaults drive the toggle; once the user flips it,
+  // we respect their choice and stop auto-adjusting.
+  let globalDenoiseUserSet = false;
+  // Last model name reported by /api/health, used to derive model-aware defaults.
+  let currentModelName = "";
 
   // ---------------- Elements ----------------
   const $ = (id) => document.getElementById(id);
@@ -661,6 +681,7 @@
     main: $("main"), log: $("log"), empty: $("empty"), chips: $("chips"),
     prompt: $("prompt"), sendBtn: $("sendBtn"),
     settingsBtn: $("settingsBtn"), popover: $("popover"), popBackdrop: $("popBackdrop"),
+    newChatBtn: $("newChatBtn"), defaultsNote: $("defaultsNote"),
     r_steps: $("r_steps"), v_steps: $("v_steps"),
     r_genlen: $("r_genlen"), v_genlen: $("v_genlen"),
     seg_block: $("seg_block"), v_block: $("v_block"),
@@ -671,18 +692,25 @@
   };
 
   // ---------------- Settings (localStorage) ----------------
+  // Set when localStorage already held an explicit global_denoise choice, so a
+  // returning user's preference survives page reloads (model defaults won't stomp it).
+  let hadSavedGlobalDenoise = false;
+
   function loadSettings() {
     let s = { ...DEFAULTS };
     try {
       const raw = localStorage.getItem(LS_KEY);
       if (raw) {
         const p = JSON.parse(raw);
-        if (typeof p === "object" && p) s = { ...s, ...p };
+        if (typeof p === "object" && p) {
+          s = { ...s, ...p };
+          if (typeof p.global_denoise === "boolean") hadSavedGlobalDenoise = true;
+        }
       }
     } catch (e) { /* corrupt storage — fall back to defaults */ }
     // clamp / sanitize
-    s.steps       = clampInt(s.steps, 16, 256, DEFAULTS.steps);
-    s.gen_len     = clampInt(s.gen_len, 32, 256, DEFAULTS.gen_len);
+    s.steps       = clampInt(s.steps, 16, 512, DEFAULTS.steps);
+    s.gen_len     = clampInt(s.gen_len, 32, 512, DEFAULTS.gen_len);
     s.block_size  = [8,16,32,64].includes(+s.block_size) ? +s.block_size : DEFAULTS.block_size;
     s.temperature = clampFloat(s.temperature, 0, 1, DEFAULTS.temperature);
     s.backend     = typeof s.backend === "string" ? s.backend.trim() : "";
@@ -697,6 +725,9 @@
   function clampFloat(v, lo, hi, dflt) { v = parseFloat(v); if (!Number.isFinite(v)) return dflt; return Math.min(hi, Math.max(lo, v)); }
 
   let settings = loadSettings();
+  // Respect a returning user's saved toggle across reloads; fresh users get
+  // model-aware defaults applied once /api/health reports the model name.
+  globalDenoiseUserSet = hadSavedGlobalDenoise;
 
   function syncSettingsUI() {
     els.r_steps.value = settings.steps;   els.v_steps.textContent = settings.steps;
@@ -729,6 +760,45 @@
     };
   }
 
+  // Model-aware defaults for the global-denoise toggle, derived from /api/health.
+  //   • "llada"  -> global denoise OFF, semi-AR with block_size 32. Long, coherent
+  //                 multi-turn answers (left-to-right within small blocks).
+  //   • "berlin" -> global denoise ON. Single-block, dramatic out-of-order reveal.
+  // Only auto-applied while the user hasn't overridden the toggle this session.
+  function applyModelDefaults(modelName) {
+    const name = (modelName || "").toLowerCase();
+    let want = null; // null => unknown model, keep current default
+    if (name.includes("llada")) want = false;
+    else if (name.includes("berlin")) want = true;
+
+    if (want !== null && !globalDenoiseUserSet) {
+      settings.global_denoise = want;
+      if (want === false && ![8, 16, 32, 64].includes(+settings.block_size)) {
+        settings.block_size = 32;
+      } else if (want === false) {
+        // ensure semi-AR uses a small block for coherent long answers
+        settings.block_size = 32;
+      }
+      els.t_global.checked = settings.global_denoise;
+      els.manualFields.classList.toggle("disabled", settings.global_denoise);
+      els.v_block.textContent = settings.block_size;
+      [...els.seg_block.children].forEach((b) =>
+        b.classList.toggle("active", +b.dataset.v === settings.block_size));
+      saveSettings();
+    }
+    updateDefaultsNote(name, want);
+  }
+
+  // Footer hint describing the model-aware default in effect.
+  function updateDefaultsNote(name, want) {
+    if (!els.defaultsNote) return;
+    let txt;
+    if (want === true) txt = "model: berlin · default global denoise ON · gen_len=" + settings.gen_len;
+    else if (want === false) txt = "model: llada · default semi-AR (block 32) · gen_len=" + settings.gen_len;
+    else txt = "default: global denoise " + (settings.global_denoise ? "ON" : "OFF") + " · gen_len=" + settings.gen_len;
+    els.defaultsNote.textContent = txt;
+  }
+
   // settings event wiring
   els.r_steps.addEventListener("input", () => { settings.steps = +els.r_steps.value; els.v_steps.textContent = settings.steps; saveSettings(); });
   els.r_genlen.addEventListener("input", () => { settings.gen_len = +els.r_genlen.value; els.v_genlen.textContent = settings.gen_len; saveSettings(); });
@@ -742,10 +812,17 @@
   els.i_backend.addEventListener("change", () => { settings.backend = els.i_backend.value.trim(); saveSettings(); });
   els.t_global.addEventListener("change", () => {
     settings.global_denoise = els.t_global.checked;
+    globalDenoiseUserSet = true; // user chose explicitly — stop auto-adjusting
     els.manualFields.classList.toggle("disabled", settings.global_denoise);
     saveSettings();
   });
-  els.resetSettings.addEventListener("click", () => { settings = { ...DEFAULTS }; syncSettingsUI(); saveSettings(); });
+  els.resetSettings.addEventListener("click", () => {
+    settings = { ...DEFAULTS };
+    globalDenoiseUserSet = false; // re-enable model-aware defaults
+    applyModelDefaults(currentModelName);
+    syncSettingsUI();
+    saveSettings();
+  });
 
   // popover open/close
   function openPop() { els.popover.classList.add("open"); els.popBackdrop.classList.add("open"); }
@@ -760,6 +837,41 @@
 
   // ---------------- Chat log helpers ----------------
   function hideEmpty() { if (els.empty) { els.empty.remove(); els.empty = null; } }
+
+  // The empty-state markup, rebuilt fresh when starting a new chat.
+  function emptyStateHTML() {
+    return (
+      '<div class="big">Watch the answer denoise</div>' +
+      '<p>This isn\'t a typewriter. The model fills in <span style="color:var(--accent)">▒▒▒</span> placeholders ' +
+      'in confidence order — so words resolve out of order as the text diffuses into being.</p>' +
+      '<p class="demo">Das Gericht entschied …</p>' +
+      '<div class="chips" id="chips">' +
+      '<button class="chip">Das Gericht entschied</button>' +
+      '<button class="chip">Die Hauptstadt von Deutschland ist</button>' +
+      '<button class="chip">Erkläre, wie Diffusionsmodelle Text erzeugen.</button>' +
+      '</div>'
+    );
+  }
+
+  // NEW CHAT: clear the conversation array + visible log, restore the empty state,
+  // so the next message starts a fresh context (no prior turns sent).
+  function newChat() {
+    if (inflight) { try { inflight.abort(); } catch (e) {} inflight = null; }
+    conversation = [];
+    els.log.replaceChildren();
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.id = "empty";
+    empty.innerHTML = emptyStateHTML();
+    els.log.appendChild(empty);
+    els.empty = empty;
+    els.chips = document.getElementById("chips");
+    wireChips();
+    setBusy(false);
+    els.prompt.value = "";
+    autosize();
+    els.prompt.focus();
+  }
 
   function scrollToBottom(force) {
     const m = els.main;
@@ -907,6 +1019,8 @@
 
     hideEmpty();
     addUserBubble(text);
+    // Record the user turn so it (and all prior turns) ship as `messages`.
+    conversation.push({ role: "user", content: text });
     els.prompt.value = "";
     autosize();
     setBusy(true);
@@ -914,6 +1028,16 @@
     const h = addAssistantTurn();
     let lastText = null;      // previous frame text (for reveal diffing)
     let gotStep = false;
+    let turnRecorded = false; // guard: push assistant turn into history exactly once
+
+    // Append the finished assistant answer to the conversation array so the next
+    // turn includes it as context. Called exactly once per turn.
+    function recordAssistantTurn(rawText) {
+      if (turnRecorded) return;
+      turnRecorded = true;
+      const clean = stripMasks(rawText).trim();
+      if (clean) conversation.push({ role: "assistant", content: clean });
+    }
 
     // Resolve sampler params once (global-denoise overrides block_size & steps).
     const params = effectiveParams();
@@ -959,6 +1083,9 @@
           lastText = ft;
           finishProgress(h);
           scrollToBottom();
+          // Persist the assistant turn so the NEXT request carries this answer as
+          // context. Strip any leftover mask chars from the final visible text.
+          recordAssistantTurn(ft);
           resolve();
         }
         // else: queue empty but stream still open -> wait for more frames
@@ -966,7 +1093,11 @@
     });
 
     const body = {
+      // Backward-compat: `prompt` is the latest user text. `messages` carries the
+      // FULL conversation (including this turn) so follow-ups like "and what about
+      // X?" resolve against prior context server-side.
       prompt: text,
+      messages: conversation.map((m) => ({ role: m.role, content: m.content })),
       gen_len: params.gen_len,
       steps: params.steps,           // == gen_len in global mode (~1 token/step)
       block_size: params.block_size, // == gen_len in global mode (one block => out-of-order)
@@ -1095,6 +1226,10 @@
     for (let i = 0; i < text.length; i++) if (text[i] === MASK_CHAR) masked++;
     return text.length - masked;
   }
+  // Remove any unresolved mask glyphs so history we send back is clean text.
+  function stripMasks(text) {
+    return typeof text === "string" ? text.split(MASK_CHAR).join("") : "";
+  }
   function clampNum(v, lo, hi) { v = Number(v); if (!Number.isFinite(v)) return lo; return Math.min(hi || v, Math.max(lo, v)); }
 
   // ---------------- Composer behaviour ----------------
@@ -1117,8 +1252,9 @@
   });
   els.sendBtn.addEventListener("click", () => sendPrompt());
 
-  // demo chips
-  if (els.chips) {
+  // demo chips — re-wired whenever the empty state is rebuilt (new chat).
+  function wireChips() {
+    if (!els.chips) return;
     els.chips.addEventListener("click", (e) => {
       const c = e.target.closest(".chip"); if (!c) return;
       els.prompt.value = c.textContent;
@@ -1127,6 +1263,10 @@
       sendPrompt();
     });
   }
+  wireChips();
+
+  // New chat button (header) — clears context + log, shows empty state.
+  els.newChatBtn.addEventListener("click", newChat);
 
   // ---------------- Model badge (GET /api/health) ----------------
   function healthEndpoint() {
@@ -1158,6 +1298,9 @@
         name.textContent = "model ready";
         pill.title = "Backend healthy";
       }
+      // Derive model-aware defaults (global-denoise toggle) from the model name.
+      currentModelName = model || "";
+      applyModelDefaults(currentModelName);
     } catch (err) {
       pill.classList.remove("loading");
       pill.classList.add("offline");
