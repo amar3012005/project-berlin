@@ -24,8 +24,8 @@ train:
   output_dir: checkpoints/qwen3_long
   epochs: 1000
   max_steps: 200000
-  per_device_batch_size: 32      # 0.5B is tiny => big batch fits B200 easily
-  grad_accum: 2                  # global 128 * 512 = ~65k tok/step
+  per_device_batch_size: 8       # A6000 48GB fit
+  grad_accum: 4                  # global 32
   num_workers: 8
   lr: 3.0e-4                     # small model trains from less-converged => higher LR
   warmup_steps: 200
@@ -37,7 +37,7 @@ train:
   loss_weight_alpha: 0.3
   grad_clip: 1.0
   nan_loss_threshold: 10000
-  grad_checkpointing: false
+  grad_checkpointing: true        # fit 48GB A6000
   resume_from: null
   precision: bf16
   log_every: 20
