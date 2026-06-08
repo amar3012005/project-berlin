@@ -26,7 +26,7 @@ train:
   max_steps: 200000
   per_device_batch_size: 8       # A6000 48GB fit
   grad_accum: 4                  # global 32
-  num_workers: 8
+  num_workers: 2                 # low fork surface (tokenizers deadlock)
   lr: 3.0e-4                     # small model trains from less-converged => higher LR
   warmup_steps: 200
   min_lr_ratio: 0.1

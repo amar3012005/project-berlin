@@ -19,7 +19,7 @@ data:
 train:
   output_dir: checkpoints/toy_gpt2
   epochs: 30
-  max_steps: 60                  # cap for quick proof; set null to use epochs
+  max_steps: 30
   per_device_batch_size: 2
   grad_accum: 1
   lr: 5.0e-5
@@ -30,7 +30,7 @@ train:
   grad_clip: 1.0
   precision: bf16                # bf16 on GPU; auto-falls back to fp32 on CPU/MPS
   log_every: 10
-  save_every: 60
+  save_every: 15
   seed: 0
   wandb: false                   # set true + WANDB_API_KEY to log
   wandb_project: project-berlin
