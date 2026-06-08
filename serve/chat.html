@@ -741,6 +741,48 @@
     const ctrl = new AbortController();
     inflight = ctrl;
 
+    // --- Decouple network-receive from render ---------------------------------
+    // The RunPod (and most reverse) proxies BUFFER the SSE response and deliver
+    // every step in one burst at the end, which would collapse the denoise into
+    // a single frame. So we never render directly from the network: we QUEUE the
+    // step frames and a fixed-cadence animator pops one per tick. If the network
+    // trickles (no buffering) the animator simply keeps pace. Either way you SEE
+    // the ▒▒▒ resolve over time. This is the diffusion effect, proxy-proof.
+    const frames = [];        // queued step payloads
+    let streamDone = false;   // server sent 'done' (or stream closed)
+    let finalText = null;
+    let animTimer = null;
+    const FRAME_MS = 70;      // playback speed: ms per denoising step
+    const animDone = new Promise((resolve) => {
+      animTimer = setInterval(() => {
+        if (frames.length) {
+          const f = frames.shift();
+          if (!h.hasRendered) h.hasRendered = true;
+          const cur = f.text;
+          renderText(h.bubble, cur, lastText);
+          lastText = cur;
+          showProgress(
+            h,
+            clampNum(f.step, 0, f.total || 0),
+            f.total || 0,
+            f.revealed != null ? f.revealed : countRevealed(cur),
+            f.gen_len != null ? f.gen_len : settings.gen_len
+          );
+          scrollToBottom();
+        } else if (streamDone) {
+          clearInterval(animTimer);
+          animTimer = null;
+          const ft = finalText != null ? finalText : (lastText || "");
+          renderText(h.bubble, ft, lastText);
+          lastText = ft;
+          finishProgress(h);
+          scrollToBottom();
+          resolve();
+        }
+        // else: queue empty but stream still open -> wait for more frames
+      }, FRAME_MS);
+    });
+
     const body = {
       prompt: text,
       gen_len: settings.gen_len,
@@ -748,6 +790,13 @@
       block_size: settings.block_size,
       temperature: settings.temperature,
     };
+
+    // Paint the fully-masked canvas instantly so the user sees the ▒▒▒ that will
+    // denoise (the proxy buffers, so the first real frame may be seconds away).
+    h.hasRendered = true;
+    renderText(h.bubble, MASK_CHAR.repeat(Math.min(settings.gen_len, 160)), null);
+    showProgress(h, 0, settings.steps, 0, settings.gen_len);
+    scrollToBottom();
 
     try {
       const resp = await fetch(endpoint(), {
@@ -787,25 +836,17 @@
 
           if (msg.type === "step") {
             gotStep = true;
-            if (!h.hasRendered) h.hasRendered = true;
-            const cur = typeof msg.text === "string" ? msg.text : "";
-            renderText(h.bubble, cur, lastText);
-            lastText = cur;
-            showProgress(
-              h,
-              clampNum(msg.step, 0, msg.total || 0),
-              msg.total || 0,
-              msg.revealed != null ? msg.revealed : countRevealed(cur),
-              msg.gen_len != null ? msg.gen_len : settings.gen_len
-            );
-            scrollToBottom();
+            // QUEUE the frame; the animator renders it on its own cadence.
+            frames.push({
+              text: typeof msg.text === "string" ? msg.text : "",
+              step: msg.step,
+              total: msg.total,
+              revealed: msg.revealed,
+              gen_len: msg.gen_len,
+            });
           } else if (msg.type === "done") {
-            const finalText = typeof msg.text === "string" ? msg.text : (lastText || "");
-            // final render: any remaining masks (shouldn't be any) just fade in
-            renderText(h.bubble, finalText, lastText);
-            lastText = finalText;
-            finishProgress(h);
-            scrollToBottom();
+            finalText = typeof msg.text === "string" ? msg.text : null;
+            streamDone = true; // animator drains the queue then renders final
           } else if (msg.type === "error") {
             errorBubble(h, msg.message);
             // stop reading; server signalled failure
@@ -816,8 +857,11 @@
       }
 
       // stream closed without explicit error
+      streamDone = true;               // let the animator finish even if no 'done'
       if (!gotStep) {
         errorBubble(h, "The model returned no steps. Is the backend running and a checkpoint loaded?");
+      } else {
+        await animDone;                // play out the queued denoising frames
       }
     } catch (err) {
       if (ctrl.signal.aborted) {
@@ -830,6 +874,7 @@
         errorBubble(h, "Connection failed: " + m);
       }
     } finally {
+      if (animTimer) { clearInterval(animTimer); animTimer = null; }
       inflight = null;
       setBusy(false);
       els.prompt.focus();
