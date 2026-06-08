@@ -67,10 +67,21 @@ class PackedDataset(Dataset):
     naive untruncated single-doc loop stalled 20min on 65k docs — this is seconds."""
     def __init__(self, paths, text_field, tokenizer, block, weights=None,
                  doc_cap_blocks=8, batch_size=1000):
+        import hashlib
         self.block = block
         eos = tokenizer.eos_token_id
         if eos is None:
             eos = tokenizer.pad_token_id or 0
+        # DISK CACHE: pack once, reload instantly on every restart/resume (the ~12min
+        # re-pack on each watchdog-resume was the real "stuck" cost). Key on inputs.
+        key = hashlib.md5(
+            (str(sorted(paths)) + str(block) + str(weights) + str(doc_cap_blocks)
+             + str(len(tokenizer))).encode()).hexdigest()[:12]
+        cache = f".pack_cache_{key}.pt"
+        if os.path.exists(cache):
+            self.data = torch.load(cache)
+            print(f"[pack] loaded cached packed data {tuple(self.data.shape)} <- {cache}")
+            return
         cap = block * doc_cap_blocks                       # cap any single doc
         docs = _read_lines(paths, text_field, weights)
         stream: list[int] = []
@@ -82,6 +93,8 @@ class PackedDataset(Dataset):
                 stream.append(eos)
         n = (len(stream) // block) * block
         self.data = torch.tensor(stream[:n], dtype=torch.long).view(-1, block)
+        torch.save(self.data, cache)
+        print(f"[pack] built + cached packed data {tuple(self.data.shape)} -> {cache}")
 
     def __len__(self):
         return self.data.size(0)

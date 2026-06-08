@@ -6,3 +6,5 @@ wandb/
 .DS_Store
 data/*.jsonl
 !data/sample_de.jsonl
+
+.pack_cache_*.pt
