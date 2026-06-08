@@ -17,7 +17,7 @@ data:
   corpus_weights: [1.5, 1.0]
   text_field: text
   max_length: 512
-  pack: true
+  pack: false
   streaming: false
 
 train:
