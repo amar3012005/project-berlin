@@ -5,7 +5,7 @@ model:
   block_size: 64
   attn_implementation: sdpa
   trust_remote_code: false
-  compile: true
+  compile: false
   compile_mode: default
 
 data:
