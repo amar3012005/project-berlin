@@ -23,6 +23,7 @@ case "$cmd" in
   train_multi)  accelerate launch --config_file configs/accelerate_ddp.yaml \
                   src/diffusion/train.py "$cfg" ;;                       # multi-GPU DDP
   monitor)      python src/monitor/server.py --metrics "${2:-checkpoints/eurollm_cluster/metrics.jsonl}" --port "${3:-8888}" ;;
+  card)         python src/diffusion/report_card.py --ckpt "${2:?usage: ./start.sh card <ckpt> [base]}" --base "${3:-utter-project/EuroLLM-1.7B}" ;;
 
   *) cat <<EOF
 usage: ./start.sh <cmd> [config.yaml]

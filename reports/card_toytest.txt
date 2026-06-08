@@ -1,0 +1,26 @@
+# Project Berlin — Report Card [toytest]
+ckpt=checkpoints/toy_gpt2/final  device=mps  gen_len=40 steps=10
+pseudo-perplexity=8847.4  (CE=9.0879) — lower=better; ~1000=untrained, tens=good
+
+PROMPT: Das Gericht entschied, dass der Angeklagte
+OUTPUT: Das Gericht entschied, dass der Angeklagte .... der die... die. die.. die......
+----------------------------------------------------------------------
+PROMPT: Gemäß DIN-Norm muss die elektrische Anlage
+OUTPUT: Gemäß DIN-Norm muss die elektrische Anlage  der die die. der
+ dieder
+
+
+
+diediediedie derder dieDie
+
+----------------------------------------------------------------------
+PROMPT: Die deutsche Wirtschaft entwickelte sich im letzten Jahr
+OUTPUT: Die deutsche Wirtschaft entwickelte sich im letzten Jahr .
+----------------------------------------------------------------------
+PROMPT: Der Vertrag zwischen den beiden Unternehmen regelt
+OUTPUT: Der Vertrag zwischen den beiden Unternehmen regelt .....................
+----------------------------------------------------------------------
+PROMPT: Künstliche Intelligenz verändert die Arbeitswelt, weil
+OUTPUT: Künstliche Intelligenz verändert die Arbeitswelt, weil  derdieDieDie
+ Dier die dieDieDieDieDieDiedie dieder die derdie.
+----------------------------------------------------------------------
