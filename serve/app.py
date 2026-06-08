@@ -15,10 +15,14 @@ Two model backends, selected by --mode / MODE env, loaded ONCE at startup:
   MODE=berlin  Our Project-Berlin checkpoint. Loads base Qwen/Qwen2.5-0.5B,
                resize_token_embeddings (mean_resizing=False), loads the trained
                safetensors shard(s) from --ckpt (stripping the "_orig_mod." compile
-               prefix), and applies apply_blockwise_bidirectional(block_size=64).
-               Sampling reuses the EXACT cosine-schedule, confidence-ordered
-               parallel-unmasking loop from src/diffusion/generate.py, but yields
-               the partial sequence at EACH denoising step.
+               prefix), and applies apply_blockwise_bidirectional. --ckpt may be a
+               concrete stepN dir OR 'latest' (resolves the newest
+               checkpoints/qwen_long/stepN at startup). Sampling reuses the EXACT
+               confidence-ordered parallel-unmasking loop from
+               src/diffusion/generate.py, yielding the partial sequence at EACH
+               denoising step. When the request block_size >= gen_len the whole gen
+               region is ONE block: full bidirectional attention + a global,
+               confidence-ordered, out-of-order reveal across the full sequence.
 
   MODE=llada   GSAI-ML/LLaDA-8B-Instruct (trust_remote_code, bf16, cuda). Implements
                LLaDA's low-confidence semi-autoregressive remasking generation
@@ -28,6 +32,7 @@ Two model backends, selected by --mode / MODE env, loaded ONCE at startup:
                partial decode each step.
 
 CLI:
+  python app.py --mode berlin --ckpt latest --port 8888
   python app.py --mode berlin --ckpt checkpoints/qwen_long/step7400 \
       --base Qwen/Qwen2.5-0.5B --port 8890
   python app.py --mode llada --port 8890
@@ -62,8 +67,14 @@ LLADA_MODEL = "GSAI-ML/LLaDA-8B-Instruct"
 LLADA_MASK_ID = 126336
 DEFAULT_BASE = "Qwen/Qwen2.5-0.5B"
 
-# Cap SSE step events so the UI animates smoothly even for steps >> 80.
+# Cap SSE step events so the UI animates smoothly even for steps >> the cap.
+# berlin's single-block global denoise wants MORE granular frames so the reveal
+# looks gradual (top-confidence positions trickle in), so it gets a higher cap.
 MAX_STEP_EVENTS = 80
+BERLIN_MAX_STEP_EVENTS = 120
+
+# Where trained berlin checkpoints live (stepN dirs written by src/diffusion/train.py).
+BERLIN_CKPT_ROOT = "checkpoints/qwen_long"
 
 # One generation at a time. The model is shared, single-GPU; serialize requests.
 _GEN_LOCK = threading.Lock()
@@ -100,13 +111,73 @@ def render_partial(tok, gen_ids, mask_id: int) -> tuple[str, int]:
     return "".join(out_parts), revealed
 
 
-def _emit_steps_filter(total_steps: int):
+def _emit_steps_filter(total_steps: int, max_events: int = MAX_STEP_EVENTS):
     """Return a predicate emit(step_index_0based, is_last) -> bool that throttles
-    to <= MAX_STEP_EVENTS events (always emitting the final step)."""
-    if total_steps <= MAX_STEP_EVENTS:
+    to <= max_events events (always emitting the final step)."""
+    if total_steps <= max_events:
         return lambda i, is_last: True
-    every = math.ceil(total_steps / MAX_STEP_EVENTS)
+    every = math.ceil(total_steps / max_events)
     return lambda i, is_last: is_last or ((i + 1) % every == 0)
+
+
+# =============================================================================
+# Checkpoint resolution
+# =============================================================================
+def _step_num(path: str) -> int:
+    """Extract the integer N from a '.../stepN' checkpoint dir name (-1 if none)."""
+    name = os.path.basename(path.rstrip("/"))
+    if name.startswith("step") and name[4:].isdigit():
+        return int(name[4:])
+    return -1
+
+
+def resolve_latest_ckpt(ckpt: str, root: str = BERLIN_CKPT_ROOT) -> str:
+    """Resolve a checkpoint spec to a concrete directory.
+
+    If ckpt is the sentinel 'latest' (case-insensitive), pick the newest
+    checkpoints/<root>/stepN dir by the highest N. We honour the LATEST pointer
+    file (written by src/diffusion/train.py) when it points at a real dir, then
+    fall back to the max-stepN scan. Anything else is returned unchanged so an
+    explicit --ckpt path keeps working exactly as before.
+
+    `root` may be absolute or relative; relative is resolved against the repo
+    root so the server can be launched from anywhere."""
+    if not ckpt or ckpt.strip().lower() != "latest":
+        return ckpt
+
+    root_dir = root if os.path.isabs(root) else os.path.join(_REPO, root)
+    if not os.path.isdir(root_dir):
+        raise RuntimeError(
+            f"BERLIN_CKPT=latest but checkpoint root not found: {root_dir!r}")
+
+    # 1) honour the LATEST pointer file if it resolves to a real dir.
+    pointer = os.path.join(root_dir, "LATEST")
+    if os.path.isfile(pointer):
+        try:
+            with open(pointer, "r", encoding="utf-8") as f:
+                target = f.read().strip()
+        except OSError:
+            target = ""
+        if target:
+            cand = target if os.path.isabs(target) else os.path.join(_REPO, target)
+            # only trust the pointer for a concrete stepN dir we can load.
+            if os.path.isdir(cand) and _step_num(cand) >= 0 \
+                    and glob.glob(os.path.join(cand, "*.safetensors")):
+                print(f"[berlin] BERLIN_CKPT=latest -> {cand} (via LATEST pointer)",
+                      flush=True)
+                return cand
+
+    # 2) scan for the highest stepN dir that actually contains weights.
+    steps = [d for d in glob.glob(os.path.join(root_dir, "step*"))
+             if os.path.isdir(d) and _step_num(d) >= 0
+             and glob.glob(os.path.join(d, "*.safetensors"))]
+    if not steps:
+        raise RuntimeError(
+            f"BERLIN_CKPT=latest but no stepN checkpoint with weights under {root_dir!r}")
+    newest = max(steps, key=_step_num)
+    print(f"[berlin] BERLIN_CKPT=latest -> {newest} "
+          f"(newest of {len(steps)} stepN dirs)", flush=True)
+    return newest
 
 
 # =============================================================================
@@ -150,15 +221,36 @@ class BerlinBackend:
                   flush=True)
 
         model.to(device).eval()
+        # Remember the configured surgery block size. When a request asks for a
+        # single global block (block_size >= gen_len) we re-apply the surgery with
+        # a block big enough to make the WHOLE gen region attend bidirectionally
+        # (one block); a later non-single-block request restores this default.
+        self._default_block_size = block_size
+        self._surgery_block_size = block_size
         apply_blockwise_bidirectional(model, block_size=block_size)
 
         self.model = model
         self.tok = tok
         self.mask_id = tok.convert_tokens_to_ids(MASK_TOKEN)
-        self.model_name = f"{base} + {os.path.basename(ckpt.rstrip('/'))}"
+
+        # health model field, e.g. "berlin:Qwen2.5-0.5B@step8200".
+        base_short = base.split("/")[-1]
+        ckpt_tag = os.path.basename(ckpt.rstrip("/"))
+        self.model_name = f"berlin:{base_short}@{ckpt_tag}"
 
     def health_model(self) -> str:
         return self.model_name
+
+    def _ensure_block_size(self, block_size: int) -> None:
+        """Re-apply the attention surgery iff the desired block size changed, so a
+        single-block global request (block_size >= gen_len) gets FULL bidirectional
+        attention across the entire gen region instead of being chopped into the
+        default-64 sub-blocks that force a left-to-right-ish reveal."""
+        if block_size == self._surgery_block_size:
+            return
+        from attention_surgery import apply_blockwise_bidirectional
+        apply_blockwise_bidirectional(self.model, block_size=block_size)
+        self._surgery_block_size = block_size
 
     @property
     def torch_no_grad(self):
@@ -170,11 +262,30 @@ class BerlinBackend:
 
         Reuses the EXACT cosine-schedule confidence-ordered parallel-unmask loop
         from src/diffusion/generate.py, but yields the partial sequence each step
-        instead of only returning the final text."""
+        instead of only returning the final text.
+
+        SINGLE-BLOCK GLOBAL DENOISE: when the request's block_size >= gen_len the
+        whole gen region is treated as ONE block. We (a) re-apply the attention
+        surgery so EVERY gen position attends to EVERY other gen position (full
+        bidirectional, not the default-64 sub-blocks), and (b) reveal the top
+        ceil(remaining_masked / remaining_steps) highest-confidence MASKED
+        positions globally each step — out of order across the full sequence, NOT
+        left-to-right. Same algorithm as generate.py, just a single block."""
         torch = self.torch
         import torch.nn.functional as F  # noqa: N812
 
         model, tok, mask_id, device = self.model, self.tok, self.mask_id, self.device
+
+        # single global block iff the caller asked for a block >= the gen region.
+        single_block = block_size >= gen_len
+        if single_block:
+            # one block must cover prompt + gen so the gen region is fully
+            # bidirectional (block(k) <= block(q) holds for all k,q in [0,total)).
+            self._ensure_block_size(max(gen_len + 256, block_size))
+        else:
+            # restore the configured default surgery (in case a previous request
+            # widened it to a single global block).
+            self._ensure_block_size(self._default_block_size)
 
         with torch.no_grad():
             prompt_ids = (tok(prompt, return_tensors="pt")["input_ids"][0].to(device)
@@ -187,7 +298,8 @@ class BerlinBackend:
                 seq[0, :p] = prompt_ids
             gen_slice = slice(p, total)
 
-            emit = _emit_steps_filter(steps)
+            # berlin gets a higher event cap so the global reveal looks gradual.
+            emit = _emit_steps_filter(steps, BERLIN_MAX_STEP_EVENTS)
 
             for step in range(steps):
                 is_mask = seq[0, gen_slice] == mask_id
@@ -211,14 +323,25 @@ class BerlinBackend:
                     probs = F.softmax(logits, dim=-1)
                     conf, pred = probs.max(dim=-1)
 
-                # cosine reveal schedule: target #still-masked after this step
-                frac = torch.cos(
-                    torch.tensor((step + 1) / steps * torch.pi / 2)).item()
-                keep_masked = int(gen_len * frac)
-
+                remaining_masked = int(is_mask.sum().item())
                 conf_masked = conf.clone()
-                conf_masked[~is_mask] = float("inf")  # already-revealed stay revealed
-                n_reveal = max(1, int(is_mask.sum().item()) - keep_masked)
+                if single_block:
+                    # whole-sequence reveal: top ceil(remaining/remaining_steps)
+                    # highest-confidence MASKED positions, globally, out of order.
+                    # Rank ONLY masked positions (revealed pushed to the bottom)
+                    # so order[:n_reveal] are genuinely the n_reveal highest-conf
+                    # masked slots across the FULL sequence (not left-to-right).
+                    remaining_steps = steps - step
+                    n_reveal = max(1, math.ceil(remaining_masked / remaining_steps))
+                    n_reveal = min(n_reveal, remaining_masked)
+                    conf_masked[~is_mask] = float("-inf")
+                else:
+                    # cosine reveal schedule: target #still-masked after this step
+                    frac = torch.cos(
+                        torch.tensor((step + 1) / steps * torch.pi / 2)).item()
+                    keep_masked = int(gen_len * frac)
+                    n_reveal = max(1, remaining_masked - keep_masked)
+                    conf_masked[~is_mask] = float("inf")  # revealed stay revealed
                 order = torch.argsort(conf_masked, descending=True)
                 reveal_idx = order[:n_reveal]
 
@@ -575,7 +698,8 @@ def main() -> None:
                     choices=["berlin", "llada"])
     ap.add_argument("--ckpt", default=os.environ.get(
         "BERLIN_CKPT", "checkpoints/qwen_long/step7400"),
-        help="berlin mode: trained checkpoint dir (safetensors + tokenizer)")
+        help="berlin mode: trained checkpoint dir (safetensors + tokenizer), or "
+             "'latest' to resolve the newest checkpoints/qwen_long/stepN dir")
     ap.add_argument("--base", default=os.environ.get("BERLIN_BASE", DEFAULT_BASE),
                     help="berlin mode: base model to reconstruct arch from")
     ap.add_argument("--block-size", type=int,
@@ -586,13 +710,15 @@ def main() -> None:
                     default=int(os.environ.get("PORT", "8890")))
     args = ap.parse_args()
 
-    # resolve ckpt relative to repo root if not absolute / not existing as given
+    # resolve the checkpoint spec (handles BERLIN_CKPT=latest -> newest stepN dir).
     ckpt = args.ckpt
-    if args.mode == "berlin" and ckpt and not os.path.isabs(ckpt) \
-            and not os.path.isdir(ckpt):
-        cand = os.path.join(_REPO, ckpt)
-        if os.path.isdir(cand):
-            ckpt = cand
+    if args.mode == "berlin":
+        ckpt = resolve_latest_ckpt(ckpt)
+        # resolve ckpt relative to repo root if not absolute / not existing as given
+        if ckpt and not os.path.isabs(ckpt) and not os.path.isdir(ckpt):
+            cand = os.path.join(_REPO, ckpt)
+            if os.path.isdir(cand):
+                ckpt = cand
 
     print(f"[serve] loading mode={args.mode} ...", flush=True)
     load_backend(mode=args.mode, base=args.base, ckpt=ckpt,

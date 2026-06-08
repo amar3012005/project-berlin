@@ -190,14 +190,81 @@
     color: var(--text-mute); padding-left: 4px; font-weight: 600;
   }
 
-  /* ===================== Token rendering (the star) ===================== */
-  .tok { transition: none; }
-  .tok.revealed {
-    animation: tokFade .42s cubic-bezier(.2,.7,.2,1) both;
+  /* live caption under the assistant bubble while denoising */
+  .denoise-cap {
+    font-size: 11.5px; line-height: 1.5;
+    color: var(--text-dim); padding-left: 4px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
+    max-width: 86%;
   }
-  @keyframes tokFade {
-    from { opacity: 0; filter: blur(4px); transform: translateY(2px); }
-    to   { opacity: 1; filter: blur(0);  transform: translateY(0); }
+  .denoise-cap.hidden { display: none; }
+  .denoise-cap .pulse-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px rgba(124,140,255,0.9);
+    animation: capPulse 1s ease-in-out infinite;
+    flex: 0 0 auto;
+  }
+  @keyframes capPulse { 0%,100%{opacity:.4;transform:scale(.8);} 50%{opacity:1;transform:scale(1.15);} }
+  .denoise-cap .cap-label {
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid var(--border-2); border-radius: 999px;
+    padding: 2px 9px; font-weight: 600; letter-spacing: 0.2px;
+    white-space: nowrap;
+  }
+  .denoise-cap .cap-stats {
+    font-family: var(--mono); font-size: 11px; color: var(--text-mute);
+    white-space: nowrap;
+  }
+  .denoise-cap .cap-stats b { color: var(--accent); font-weight: 600; }
+
+  /* model badge pill in the header */
+  .model-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.2px;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid var(--border-2);
+    max-width: 230px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: opacity .2s, background .2s, color .2s;
+  }
+  .model-pill .dot {
+    width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
+    background: #46d39a; box-shadow: 0 0 7px rgba(70,211,154,0.85);
+  }
+  .model-pill.loading { color: var(--text-mute); }
+  .model-pill.loading .dot { background: var(--text-mute); box-shadow: none; animation: capPulse 1s ease-in-out infinite; }
+  .model-pill.offline { color: #ff9b9b; background: rgba(255,86,86,0.08); }
+  .model-pill.offline .dot { background: #ff5656; box-shadow: 0 0 7px rgba(255,86,86,0.6); }
+  @media (max-width: 600px) { .model-pill { max-width: 130px; } }
+
+  /* ===================== Token rendering (the star) ===================== */
+  .tok { transition: none; display: inline-block; }
+  /* A token that just flipped from ▒ to a real glyph: bright glow + pop so the
+     eye catches positions resolving in scattered (out-of-order) locations. */
+  .tok.revealed {
+    animation: tokPop .52s cubic-bezier(.18,.8,.2,1) both;
+    transform-origin: center 60%;
+  }
+  @keyframes tokPop {
+    0% {
+      opacity: 0; filter: blur(4px);
+      transform: translateY(2px) scale(1.42);
+      color: #cdd6ff;
+      text-shadow: 0 0 14px rgba(124,140,255,1), 0 0 26px rgba(124,140,255,0.75);
+    }
+    35% {
+      opacity: 1; filter: blur(0);
+      transform: translateY(0) scale(1.34);
+      color: #eef1ff;
+      text-shadow: 0 0 12px rgba(124,140,255,0.95), 0 0 22px rgba(124,140,255,0.55);
+    }
+    100% {
+      opacity: 1; filter: blur(0);
+      transform: translateY(0) scale(1);
+      color: var(--text);
+      text-shadow: none;
+    }
   }
   /* a masked slot — shimmering pulsing block */
   .mask {
@@ -379,6 +446,40 @@
     width: 16px; height: 16px; border-radius: 50%;
     background: #fff; border: 3px solid var(--accent-2); cursor: pointer;
   }
+  /* prominent global-denoise toggle */
+  .toggle-card {
+    margin: -2px 0 16px;
+    padding: 12px 13px;
+    border-radius: 12px;
+    border: 1px solid var(--accent);
+    background: linear-gradient(135deg, var(--accent-soft), rgba(124,140,255,0.05));
+    box-shadow: inset 0 0 0 1px rgba(124,140,255,0.10);
+  }
+  .toggle-card .tc-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .toggle-card .tc-label { font-size: 13px; font-weight: 650; color: var(--text); }
+  .toggle-card .tc-desc {
+    font-size: 11px; color: var(--text-dim); margin-top: 6px; line-height: 1.45;
+  }
+  .switch { position: relative; flex: 0 0 auto; width: 44px; height: 25px; cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--border-2); transition: background .18s;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+  }
+  .switch .knob {
+    position: absolute; top: 3px; left: 3px;
+    width: 19px; height: 19px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    transition: transform .18s;
+  }
+  .switch input:checked + .track { background: var(--accent-2); box-shadow: 0 0 10px rgba(79,107,255,0.5); }
+  .switch input:checked + .track + .knob { transform: translateX(19px); }
+  /* dim the manual sliders when global-denoise is ON */
+  .manual-fields.disabled { opacity: 0.4; pointer-events: none; filter: grayscale(0.3); }
+
   .seg { display: flex; gap: 6px; }
   .seg button {
     flex: 1; padding: 7px 0; border-radius: 9px;
@@ -423,6 +524,8 @@
     .mask { animation-duration: 2.4s; }
     .tok.revealed { animation: none; }
     .logo::after { animation: none; }
+    .denoise-cap .pulse-dot { animation: none; }
+    .model-pill.loading .dot { animation: none; }
   }
 </style>
 </head>
@@ -439,6 +542,9 @@
         <div class="sub">watch the answer denoise</div>
       </div>
       <div class="spacer"></div>
+      <span class="model-pill loading" id="modelPill" title="Active model">
+        <span class="dot"></span><span id="modelName">checking…</span>
+      </span>
       <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -487,29 +593,47 @@
     </h3>
     <p class="ph-sub">Controls the reverse-diffusion sampler. Saved on this device.</p>
 
-    <div class="field">
-      <div class="field-head"><label for="r_steps">Denoising steps</label><span class="val" id="v_steps">128</span></div>
-      <input type="range" id="r_steps" min="16" max="256" step="1" value="128" />
+    <div class="toggle-card">
+      <div class="tc-row">
+        <div class="tc-label">Global denoise (single block)</div>
+        <label class="switch" for="t_global">
+          <input type="checkbox" id="t_global" checked />
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="tc-desc">
+        Forces the whole sequence into <b>one block</b> with one step per token, so it
+        denoises <b>globally and out of order</b> — not left-to-right. Turn off for manual block control.
+      </div>
     </div>
 
+    <!-- Generation length is always active (global mode derives steps & block from it). -->
     <div class="field">
       <div class="field-head"><label for="r_genlen">Generation length</label><span class="val" id="v_genlen">128</span></div>
       <input type="range" id="r_genlen" min="32" max="256" step="1" value="128" />
     </div>
 
-    <div class="field">
-      <div class="field-head"><label>Block size</label><span class="val" id="v_block">32</span></div>
-      <div class="seg" id="seg_block">
-        <button data-v="8">8</button>
-        <button data-v="16">16</button>
-        <button data-v="32">32</button>
-        <button data-v="64">64</button>
+    <!-- These are overridden while Global denoise is ON. -->
+    <div class="manual-fields" id="manualFields">
+      <div class="field">
+        <div class="field-head"><label for="r_steps">Denoising steps</label><span class="val" id="v_steps">128</span></div>
+        <input type="range" id="r_steps" min="16" max="256" step="1" value="128" />
       </div>
-    </div>
 
-    <div class="field">
-      <div class="field-head"><label for="r_temp">Temperature</label><span class="val" id="v_temp">0.30</span></div>
-      <input type="range" id="r_temp" min="0" max="1" step="0.01" value="0.30" />
+      <div class="field">
+        <div class="field-head"><label>Block size</label><span class="val" id="v_block">32</span></div>
+        <div class="seg" id="seg_block">
+          <button data-v="8">8</button>
+          <button data-v="16">16</button>
+          <button data-v="32">32</button>
+          <button data-v="64">64</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <div class="field-head"><label for="r_temp">Temperature</label><span class="val" id="v_temp">0.30</span></div>
+        <input type="range" id="r_temp" min="0" max="1" step="0.01" value="0.30" />
+      </div>
     </div>
 
     <div class="backend-field">
@@ -519,7 +643,7 @@
 
     <div class="pop-foot">
       <button class="reset-link" id="resetSettings">Reset to defaults</button>
-      <span style="font-size:11px;color:var(--text-mute)">steps=128 · gen_len=128 · block=32 · temp=0.3</span>
+      <span style="font-size:11px;color:var(--text-mute)">default: global denoise ON · gen_len=128</span>
     </div>
   </div>
 
@@ -528,8 +652,8 @@
 (function () {
   // ---------------- Constants & contract ----------------
   const MASK_CHAR = "▒"; // ▒  (must match the server's mask token)
-  const DEFAULTS = { steps: 128, gen_len: 128, block_size: 32, temperature: 0.3, backend: "" };
-  const LS_KEY = "berlin.diffchat.settings.v1";
+  const DEFAULTS = { steps: 128, gen_len: 128, block_size: 32, temperature: 0.3, backend: "", global_denoise: true };
+  const LS_KEY = "berlin.diffchat.settings.v2";
 
   // ---------------- Elements ----------------
   const $ = (id) => document.getElementById(id);
@@ -542,6 +666,8 @@
     seg_block: $("seg_block"), v_block: $("v_block"),
     r_temp: $("r_temp"), v_temp: $("v_temp"),
     i_backend: $("i_backend"), resetSettings: $("resetSettings"),
+    t_global: $("t_global"), manualFields: $("manualFields"),
+    modelPill: $("modelPill"), modelName: $("modelName"),
   };
 
   // ---------------- Settings (localStorage) ----------------
@@ -560,6 +686,7 @@
     s.block_size  = [8,16,32,64].includes(+s.block_size) ? +s.block_size : DEFAULTS.block_size;
     s.temperature = clampFloat(s.temperature, 0, 1, DEFAULTS.temperature);
     s.backend     = typeof s.backend === "string" ? s.backend.trim() : "";
+    s.global_denoise = typeof s.global_denoise === "boolean" ? s.global_denoise : DEFAULTS.global_denoise;
     return s;
   }
   function saveSettings() {
@@ -577,7 +704,29 @@
     els.r_temp.value = settings.temperature; els.v_temp.textContent = settings.temperature.toFixed(2);
     els.v_block.textContent = settings.block_size;
     els.i_backend.value = settings.backend;
+    els.t_global.checked = !!settings.global_denoise;
+    els.manualFields.classList.toggle("disabled", !!settings.global_denoise);
     [...els.seg_block.children].forEach((b) => b.classList.toggle("active", +b.dataset.v === settings.block_size));
+  }
+
+  // Resolve the actual sampler params for a request. In global-denoise mode the
+  // whole sequence is ONE block (block_size == gen_len => out-of-order global
+  // denoise) and steps == gen_len (~1 token revealed per step).
+  function effectiveParams() {
+    if (settings.global_denoise) {
+      return {
+        gen_len: settings.gen_len,
+        steps: settings.gen_len,
+        block_size: settings.gen_len,
+        temperature: settings.temperature,
+      };
+    }
+    return {
+      gen_len: settings.gen_len,
+      steps: settings.steps,
+      block_size: settings.block_size,
+      temperature: settings.temperature,
+    };
   }
 
   // settings event wiring
@@ -591,6 +740,11 @@
     saveSettings();
   });
   els.i_backend.addEventListener("change", () => { settings.backend = els.i_backend.value.trim(); saveSettings(); });
+  els.t_global.addEventListener("change", () => {
+    settings.global_denoise = els.t_global.checked;
+    els.manualFields.classList.toggle("disabled", settings.global_denoise);
+    saveSettings();
+  });
   els.resetSettings.addEventListener("click", () => { settings = { ...DEFAULTS }; syncSettingsUI(); saveSettings(); });
 
   // popover open/close
@@ -643,6 +797,14 @@
     dots.innerHTML = "<span></span><span></span><span></span>";
     bubble.appendChild(dots);
 
+    // live caption: global bidirectional denoise — tokens resolve out of order
+    const caption = document.createElement("div");
+    caption.className = "denoise-cap hidden";
+    caption.innerHTML =
+      '<span class="pulse-dot"></span>' +
+      '<span class="cap-label"></span>' +
+      '<span class="cap-stats"></span>';
+
     const progress = document.createElement("div");
     progress.className = "progress hidden";
     progress.innerHTML =
@@ -651,6 +813,7 @@
 
     col.appendChild(tag);
     col.appendChild(bubble);
+    col.appendChild(caption);
     col.appendChild(progress);
     wrap.appendChild(col);
     els.log.appendChild(wrap);
@@ -658,6 +821,9 @@
 
     return {
       bubble,
+      caption,
+      capLabel: caption.querySelector(".cap-label"),
+      capStats: caption.querySelector(".cap-stats"),
       progress,
       fill: progress.querySelector(".pbar-fill"),
       ptxt: progress.querySelector(".ptxt"),
@@ -694,24 +860,35 @@
     bubble.replaceChildren(frag);
   }
 
-  function showProgress(h, step, total, revealed, genLen) {
+  function showProgress(h, step, total, revealed, genLen, isGlobal) {
     if (h.progress.classList.contains("hidden")) h.progress.classList.remove("hidden");
     const pct = total > 0 ? Math.min(100, Math.round((step / total) * 100)) : 0;
     h.fill.style.width = pct + "%";
     h.ptxt.innerHTML =
       `step <b>${step}</b> / ${total} · <b>${revealed}</b>/${genLen} revealed`;
+    // live caption beneath the bubble
+    if (h.caption.classList.contains("hidden")) h.caption.classList.remove("hidden");
+    h.capLabel.textContent = isGlobal
+      ? "global bidirectional denoise — tokens resolve out of order"
+      : "block-wise denoise";
+    h.capStats.innerHTML =
+      `step <b>${step}</b>/<b>${total}</b> · <b>${revealed}</b>/<b>${genLen}</b> revealed`;
   }
 
   function finishProgress(h) {
     h.fill.style.width = "100%";
     // brief settle then hide
-    setTimeout(() => { h.progress.classList.add("hidden"); }, 260);
+    setTimeout(() => {
+      h.progress.classList.add("hidden");
+      h.caption.classList.add("hidden");
+    }, 320);
   }
 
   function errorBubble(h, msg) {
     h.bubble.classList.add("error");
     h.bubble.textContent = "⚠ " + (msg || "Something went wrong while denoising.");
     h.progress.classList.add("hidden");
+    h.caption.classList.add("hidden");
     scrollToBottom();
   }
 
@@ -738,6 +915,10 @@
     let lastText = null;      // previous frame text (for reveal diffing)
     let gotStep = false;
 
+    // Resolve sampler params once (global-denoise overrides block_size & steps).
+    const params = effectiveParams();
+    const isGlobal = !!settings.global_denoise;
+
     const ctrl = new AbortController();
     inflight = ctrl;
 
@@ -752,7 +933,7 @@
     let streamDone = false;   // server sent 'done' (or stream closed)
     let finalText = null;
     let animTimer = null;
-    const FRAME_MS = 70;      // playback speed: ms per denoising step
+    const FRAME_MS = 90;      // playback speed: ms per denoising step
     const animDone = new Promise((resolve) => {
       animTimer = setInterval(() => {
         if (frames.length) {
@@ -766,7 +947,8 @@
             clampNum(f.step, 0, f.total || 0),
             f.total || 0,
             f.revealed != null ? f.revealed : countRevealed(cur),
-            f.gen_len != null ? f.gen_len : settings.gen_len
+            f.gen_len != null ? f.gen_len : params.gen_len,
+            isGlobal
           );
           scrollToBottom();
         } else if (streamDone) {
@@ -785,17 +967,17 @@
 
     const body = {
       prompt: text,
-      gen_len: settings.gen_len,
-      steps: settings.steps,
-      block_size: settings.block_size,
-      temperature: settings.temperature,
+      gen_len: params.gen_len,
+      steps: params.steps,           // == gen_len in global mode (~1 token/step)
+      block_size: params.block_size, // == gen_len in global mode (one block => out-of-order)
+      temperature: params.temperature,
     };
 
     // Paint the fully-masked canvas instantly so the user sees the ▒▒▒ that will
     // denoise (the proxy buffers, so the first real frame may be seconds away).
     h.hasRendered = true;
-    renderText(h.bubble, MASK_CHAR.repeat(Math.min(settings.gen_len, 160)), null);
-    showProgress(h, 0, settings.steps, 0, settings.gen_len);
+    renderText(h.bubble, MASK_CHAR.repeat(Math.min(params.gen_len, 160)), null);
+    showProgress(h, 0, params.steps, 0, params.gen_len, isGlobal);
     scrollToBottom();
 
     try {
@@ -946,8 +1128,59 @@
     });
   }
 
-  // focus input on load
-  window.addEventListener("load", () => els.prompt.focus());
+  // ---------------- Model badge (GET /api/health) ----------------
+  function healthEndpoint() {
+    const base = (settings.backend || "").replace(/\/+$/, "");
+    return (base || "") + "/api/health";
+  }
+
+  async function loadModelBadge() {
+    const pill = els.modelPill;
+    const name = els.modelName;
+    if (!pill || !name) return;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 6000); // external call timeout
+    try {
+      const resp = await fetch(healthEndpoint(), {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      const model = data && typeof data.model === "string" && data.model.trim()
+        ? data.model.trim() : null;
+      pill.classList.remove("loading", "offline");
+      if (model) {
+        name.textContent = model;
+        pill.title = "Active model: " + model + (data.mode ? " (" + data.mode + ")" : "");
+      } else {
+        name.textContent = "model ready";
+        pill.title = "Backend healthy";
+      }
+    } catch (err) {
+      pill.classList.remove("loading");
+      pill.classList.add("offline");
+      name.textContent = "offline";
+      pill.title = "Backend unreachable — start app.py / set a Backend URL in settings.";
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  // re-check health when the backend URL changes
+  els.i_backend.addEventListener("change", () => {
+    els.modelPill.classList.remove("offline");
+    els.modelPill.classList.add("loading");
+    els.modelName.textContent = "checking…";
+    loadModelBadge().catch(() => {});
+  });
+
+  // focus input on load + fetch model badge
+  window.addEventListener("load", () => {
+    els.prompt.focus();
+    loadModelBadge().catch(() => {});
+  });
 })();
 </script>
 </body>
