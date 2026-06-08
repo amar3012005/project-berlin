@@ -163,7 +163,7 @@ def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True, num_workers=
         ds = PackedDataset(cfg_data["jsonl_paths"], cfg_data["text_field"],
                            tokenizer, cfg_data["max_length"], weights=weights)
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
-                          num_workers=num_workers, pin_memory=True,
+                          num_workers=num_workers, pin_memory=False,
                           persistent_workers=num_workers > 0, drop_last=True)
 
     ds = JsonlTextDataset(cfg_data["jsonl_paths"], cfg_data["text_field"],
@@ -171,5 +171,5 @@ def build_dataloader(cfg_data, tokenizer, batch_size, shuffle=True, num_workers=
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                       collate_fn=lambda b: _collate(b, pad_id),
                       num_workers=num_workers,
-                      pin_memory=True,
+                      pin_memory=False,
                       persistent_workers=num_workers > 0)
