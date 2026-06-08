@@ -1,0 +1,47 @@
+# Long run — Qwen2.5-0.5B AR->discrete-diffusion surgery. Tiny+modern => fast/cheap
+# to coherent German within the 3-4hr cap. Crash-safe (save_every 100) + auto-resume.
+model:
+  name: Qwen/Qwen2.5-0.5B        # 0.5B, ungated, Qwen2-arch (create_causal_mask surgery works)
+  block_size: 64
+  attn_implementation: sdpa
+  trust_remote_code: false
+  compile: true
+  compile_mode: default
+
+data:
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/openlegaldata_de.jsonl
+    - data/wikipedia_de.jsonl
+  corpus_weights: [1.5, 1.0]
+  text_field: text
+  max_length: 512
+  pack: true
+  streaming: false
+
+train:
+  output_dir: checkpoints/qwen_long
+  epochs: 1000
+  max_steps: 200000
+  per_device_batch_size: 64      # 0.5B is tiny => big batch fits B200 easily
+  grad_accum: 2                  # global 128 * 512 = ~65k tok/step
+  num_workers: 8
+  lr: 3.0e-4                     # small model trains from less-converged => higher LR
+  warmup_steps: 200
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  t_min: 0.05
+  mask_schedule: beta
+  mask_block_size: 64
+  loss_weight_alpha: 0.3
+  grad_clip: 1.0
+  nan_loss_threshold: 10000
+  grad_checkpointing: false
+  resume_from: null
+  precision: bf16
+  log_every: 20
+  save_every: 100
+  seed: 0
+  wandb: false
+  wandb_project: project-berlin
