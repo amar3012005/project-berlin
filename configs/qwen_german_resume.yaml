@@ -1,0 +1,48 @@
+# CONTINUE the existing 0.5B diffusion run on a BIGGER GERMAN corpus.
+# Weights-only resume from checkpoints/qwen_long/step8000 (NOT fresh) -> same
+# output_dir so step numbering + LATEST continue seamlessly (step8000 -> 8100...).
+# Corpus swap English FineWeb -> German FineWeb-2 (deu_Latn, ~8x more unique data)
+# = continued pretraining; the model adapts toward German. Boolean SDPA mask path.
+model:
+  name: Qwen/Qwen2.5-0.5B
+  block_size: 64
+  attn_implementation: sdpa
+  trust_remote_code: false
+  compile: false
+  compile_mode: default
+
+data:
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/german_corpus.jsonl     # German FineWeb-2, fetched on pod (~300k docs)
+  corpus_weights: null
+  text_field: text
+  max_length: 512
+  pack: true
+  streaming: false
+
+train:
+  output_dir: checkpoints/qwen_long      # SAME dir -> continues from step8000
+  resume_from: checkpoints/qwen_long/step8000   # weights-only resume (continue, not fresh)
+  epochs: 1000
+  max_steps: 200000
+  per_device_batch_size: 8         # 18GB; coexists with LLaDA server (~19GB) on 48GB A6000
+  grad_accum: 8                    # global batch 64
+  num_workers: 8
+  lr: 3.0e-4
+  warmup_steps: 200                # short re-warmup (optimizer restarts on weights-only resume)
+  min_lr_ratio: 0.1
+  weight_decay: 0.01
+  t_min: 1.0e-3
+  mask_schedule: uniform
+  mask_block_size: 64
+  loss_weight_alpha: 0.0
+  grad_clip: 1.0
+  grad_checkpointing: false
+  precision: bf16
+  log_every: 20
+  save_every: 100
+  seed: 0
+  wandb: false
+  wandb_project: project-berlin
