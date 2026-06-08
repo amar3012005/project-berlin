@@ -1,0 +1,17 @@
+# 8xH100 80GB single-node DDP launch — the REAL German run (german_scaled.yaml).
+# Qwen2.5-0.5B fits one 80GB H100 with room to spare, so DDP (full model replicated
+# per GPU, data split across them, gradients all-reduced) is the right call — NO
+# FSDP sharding overhead/hangs (FSDP is only needed when a model won't fit one GPU).
+#   accelerate launch --config_file configs/accelerate_8xh100.yaml \
+#       src/diffusion/train.py configs/german_scaled.yaml
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: bf16
+num_machines: 1
+num_processes: 8                 # = 8 x H100 80GB on one node
+gpu_ids: all
+rdzv_backend: static
+same_network: true
+downcast_bf16: true
+machine_rank: 0
+main_training_function: main

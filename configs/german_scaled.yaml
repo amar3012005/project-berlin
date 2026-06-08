@@ -1,0 +1,81 @@
+# =============================================================================
+# GERMAN SCALED — the REAL run.  Same pipeline as qwen_long.yaml, scaled to
+# produce an actual German masked-diffusion LM on a single 8xH100 80GB node.
+#
+#   THE REAL RUN:
+#     * Hardware   : 8 x H100 80GB (single node, DDP)
+#     * Tokens     : ~30B German tokens  (max_steps * global_batch * seq_len)
+#                    920000 steps * 512 global batch * 64 seq = ~30.1B tokens
+#     * Wall clock : ~20h  (8xH100, bf16, seq 64, batch 32/GPU, ~12-13 steps/s)
+#     * Cost       : ~$390  (8xH100 @ ~$2.40/GPU-hr * 8 * 20h ~= $384)
+#
+#   ATTENTION PATH (do NOT change attn_implementation):
+#     attn_implementation: sdpa  ->  the AR Qwen2 causal mask is surgically
+#     replaced (apply_blockwise_bidirectional) with a BOOLEAN block-mask that
+#     SDPA consumes as a bidirectional bias (is_causal auto-False). NO eager,
+#     NO additive -inf bias -> no backward hang. This is the whole reason the
+#     surgery works: SDPA + boolean mask = clean bidirectional diffusion attn.
+#
+#   LEARNING RATE SCALES WITH GLOBAL BATCH:
+#     global batch here = per_device_batch_size(32) * grad_accum(2) * 8 GPUs = 512.
+#     LR 3.0e-4 is tuned for this ~512 global batch (linear-ish scaling rule).
+#     If you change per_device_batch_size / grad_accum / num GPUs, RESCALE lr
+#     proportionally to the new global batch or convergence/stability will drift.
+#
+#   LAUNCH (8xH100 DDP):
+#     bash scripts/fetch_german.sh        # build data/german_corpus.jsonl first
+#     accelerate launch --config_file configs/accelerate_8xh100.yaml \
+#         src/diffusion/train.py configs/german_scaled.yaml
+# =============================================================================
+model:
+  name: Qwen/Qwen2.5-0.5B          # 0.5B, ungated, Qwen2-arch -> generic mask patch
+  block_size: 64
+  attn_implementation: sdpa        # MUST be sdpa: consumes the boolean block-mask
+  trust_remote_code: false
+  compile: false                   # keep OFF until a clean multi-GPU run is confirmed
+  compile_mode: default
+
+data:
+  # PREFERRED for a 30B-token run: stream a large German corpus directly from HF
+  # (no multi-TB local download). dataset.py hf_dataset path supports streaming.
+  # FineWeb-2 German is the highest-quality option (see scripts/fetch_german.sh):
+  #   hf_dataset: HuggingFaceFW/fineweb-2
+  #   hf_config: deu_Latn
+  #   streaming: true
+  # DEFAULT (reproducible, ungated, cached pack): the launcher fetches a large
+  # German corpus to data/german_corpus.jsonl, then PackedDataset packs+caches it.
+  hf_dataset: null
+  hf_config: null
+  jsonl_paths:
+    - data/german_corpus.jsonl     # built by scripts/fetch_german.sh (~500k docs)
+  corpus_weights: null
+  text_field: text
+  max_length: 64                   # = block_size: pack into 64-token diffusion blocks
+  pack: true                       # static shapes, zero PAD waste, every token trains
+  streaming: false                 # set true + use hf_dataset above to stream FineWeb-2
+
+train:
+  output_dir: checkpoints/german_scaled
+  epochs: 1000                     # epochs is a ceiling; max_steps is the real horizon
+  max_steps: 920000                # 920000 * 512 * 64 = ~30.1B German tokens
+  per_device_batch_size: 32        # sized for ONE 80GB H100 (Qwen2.5 vocab=151936
+                                   # => fp32-CE logits dominate; 32 @ seq 64 fits 80GB)
+  grad_accum: 2                    # 32 * 2 * 8 GPUs = GLOBAL BATCH 512
+  num_workers: 8
+  lr: 3.0e-4                       # tuned for global batch 512 — rescale if batch changes
+  warmup_steps: 500
+  min_lr_ratio: 0.0033             # t_min-style LR floor: 1e-3 / 3.0e-4 ~= 0.0033 -> ~1e-3 min LR
+  weight_decay: 0.01
+  t_min: 1.0e-3                    # eps floor: bounds 1/t weight (<=1000), prevents inf grad
+  mask_schedule: uniform           # proven LLaDA t~U[t_min,1]
+  mask_block_size: 64              # block-aligned masking matches the attention blocks
+  loss_weight_alpha: 0.0           # 0.0 = pure 1/t LLaDA loss
+  grad_clip: 1.0
+  grad_checkpointing: false        # OFF (co-trigger with the eager+mask hang); fits 80GB
+  resume_from: null                # auto-resumes from output_dir/BERLIN_RESUME if set
+  precision: bf16
+  log_every: 20
+  save_every: 500                  # crash-safe: ~every 40min wall; auto-resume on restart
+  seed: 0
+  wandb: false
+  wandb_project: project-berlin
