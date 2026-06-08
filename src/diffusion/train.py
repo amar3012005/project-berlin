@@ -18,11 +18,17 @@ import os
 import sys
 import json
 import math
+import faulthandler
 import yaml
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+
+# DIAGNOSTIC: dump all thread stacks every 90s to stderr. During the intermittent
+# stall, repeated identical stacks reveal exactly where it's stuck (py-spy is
+# blocked in the RunPod container — no SYS_PTRACE — so this is how we profile).
+faulthandler.dump_traceback_later(90, repeat=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "data"))
