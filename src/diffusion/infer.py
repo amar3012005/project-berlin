@@ -48,9 +48,12 @@ def main() -> None:
     state = {}
     for s in shards:
         state.update(load_file(s))
+    state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}  # compile prefix
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"[infer] loaded {len(state)} tensors from {len(shards)} shard(s); "
           f"missing={len(missing)} unexpected={len(unexpected)}")
+    if len(missing) > len(state) * 0.5:
+        print("[infer] WARN: >50% keys missing — running near-base model, not trained!")
     model.to(device).eval()
     apply_blockwise_bidirectional(model, block_size=args.block_size)
     mask_id = tok.convert_tokens_to_ids(MASK_TOKEN)

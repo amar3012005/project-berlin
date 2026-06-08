@@ -35,8 +35,13 @@ def main() -> None:
     state = {}
     for s in shards:
         state.update(load_file(s))
+    # strip torch.compile's "_orig_mod." prefix (compiled-run checkpoints) else keys
+    # mismatch and load_state_dict(strict=False) silently loads NOTHING
+    state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"[push] merged {len(state)} tensors; missing={len(missing)} unexpected={len(unexpected)}")
+    if len(missing) > len(state) * 0.5:
+        raise SystemExit("[push] ABORT: >50% keys missing — checkpoint didn't load, refusing to push base model")
 
     print(f"[push] uploading -> https://huggingface.co/{args.repo} (private={args.private})")
     model.push_to_hub(args.repo, private=args.private)

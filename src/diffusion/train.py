@@ -212,6 +212,10 @@ def _save(accel, model, tok, out_dir, step, final=False, train_step=0):
     tag = "final" if final else f"step{step}"
     path = os.path.join(out_dir, tag)
     unwrapped = accel.unwrap_model(model)
+    # strip torch.compile wrapper so saved keys have NO "_orig_mod." prefix
+    # (otherwise reload/resume/push silently load nothing)
+    if hasattr(unwrapped, "_orig_mod"):
+        unwrapped = unwrapped._orig_mod
     if accel.is_main_process:
         os.makedirs(path, exist_ok=True)
         tok.save_pretrained(path)

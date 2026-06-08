@@ -62,7 +62,10 @@ def load_weights(model, ckpt):
         state = {}
         for s in shards:
             state.update(load_file(s))
-        model.load_state_dict(state, strict=False)
+        state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}  # compile prefix
+        missing, _ = model.load_state_dict(state, strict=False)
+        if len(missing) > len(state) * 0.5:
+            raise SystemExit("[eval] checkpoint failed to load (>50% keys missing)")
 
 
 def main() -> None:
