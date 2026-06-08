@@ -96,15 +96,20 @@ def denoise_loss(model, input_ids: torch.Tensor, mask_id: int,
     logits = model(input_ids=noised).logits          # (batch, seq, vocab)
 
     ce = F.cross_entropy(
-        logits.view(-1, logits.size(-1)),
+        logits.view(-1, logits.size(-1)).float(),     # CE in fp32 for bf16 stability
         input_ids.view(-1),
         reduction="none",
     ).view_as(input_ids)                              # (batch, seq)
 
-    # smoothed NELBO weight: alpha + (1-alpha)/t  (variance-reduced vs pure 1/t)
-    weight = (weight_alpha + (1.0 - weight_alpha) / t)[:, None]
-    masked_ce = ce * mask_bool.float() * weight
-    loss = masked_ce.sum() / mask_bool.float().sum().clamp_min(1.0)
+    # NELBO Monte-Carlo weight w(t) = alpha + (1-alpha)/t  (alpha=0 => pure 1/t LLaDA).
+    # t_min already floors t, so 1/t is bounded; clamp inv_t defensively so a single
+    # tiny-t batch can never emit an inf/NaN gradient (the t_min floor is the real guard).
+    inv_t = (1.0 / t.clamp_min(t_min)).clamp_max(1.0 / max(t_min, 1e-3))
+    weight = (weight_alpha + (1.0 - weight_alpha) * inv_t)[:, None]   # (batch,1)
+
+    mask_f = mask_bool.float()
+    masked_ce = ce * mask_f * weight
+    loss = masked_ce.sum() / mask_f.sum().clamp_min(1.0)   # DiffuLLaMA: /#masked, >=1
     return loss, mask_bool
 
 

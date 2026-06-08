@@ -28,19 +28,27 @@ def build_blockwise_bidirectional_mask(
     seq_len: int,
     block_size: int,
     device,
-    dtype,
+    dtype,  # kept for signature compat; boolean mask is dtype-agnostic
     padding_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Additive 4D mask (batch?,1,q,kv): 0.0 = attend, -inf = block."""
+    """Boolean 4D mask (batch?,1,q,kv): True = attend, False = block.
+
+    Block-wise bidirectional: block(k) <= block(q). We pass this BOOLEAN mask
+    straight to SDPA (True=keep). SDPA sees a non-None mask -> sets is_causal=False
+    internally -> dense within-and-prior blocks. The diagonal is forced True so every
+    query row always has >=1 visible key => SDPA/flash never sees a fully-masked row
+    => no NaN/hang in the backward pass (the finfo.min footgun that hung autograd
+    via the all-masked-row softmax-gradient NaN, pytorch #110213, is gone)."""
     idx = torch.arange(seq_len, device=device)
     blk = idx // block_size
-    allowed = blk[None, :] <= blk[:, None]
-    neg = torch.finfo(dtype).min
-    mask = torch.where(allowed, 0.0, neg).to(dtype)
-    mask = mask[None, None, :, :]
+    allowed = blk[None, :] <= blk[:, None]                 # (q, kv) bool
+    allowed = allowed | torch.eye(seq_len, dtype=torch.bool, device=device)
+    mask = allowed[None, None, :, :]                       # (1,1,q,kv)
     if padding_mask is not None:
-        pad = (1 - padding_mask[:, None, None, :].to(dtype)) * neg
-        mask = mask + pad
+        pad_keep = padding_mask[:, None, None, :].to(torch.bool)   # (b,1,1,kv)
+        mask = mask & pad_keep                             # (b,1,q,kv)
+        eye = torch.eye(seq_len, dtype=torch.bool, device=device)[None, None, :, :]
+        mask = mask | eye                                  # re-guarantee >=1 visible key
     return mask
 
 
@@ -75,10 +83,13 @@ def apply_blockwise_bidirectional(model, block_size: int = 64) -> None:
         )
 
     mod.create_causal_mask = _patched
-    # eager honours arbitrary float masks on every backend incl. CPU/MPS.
-    # On GPU you may instead use 'sdpa' (set in config) — float mask still works.
-    if getattr(model.config, "_attn_implementation", None) in (None, "flash_attention_2"):
-        model.config._attn_implementation = "eager"
+    # Do NOT force eager. SDPA natively consumes the BOOLEAN mask (True=keep) and,
+    # because the mask is non-None, sets is_causal=False -> block-wise bidirectional
+    # with ZERO additive -inf. eager + additive finfo.min was the backward-hang
+    # trigger (all-masked-row softmax-grad NaN, pytorch #110213); it is gone.
+    # flash kernel can't take an arbitrary boolean attn_mask -> route to sdpa.
+    if getattr(model.config, "_attn_implementation", None) == "flash_attention_2":
+        model.config._attn_implementation = "sdpa"
     model._berlin_block_size = block_size
 
 
@@ -99,10 +110,10 @@ def _selftest() -> None:
 
     m = build_blockwise_bidirectional_mask(8, block, torch.device(device), torch.float32)
     m2 = m[0, 0]
-    neg = torch.finfo(torch.float32).min
-    assert m2[0, 3] == 0.0, "within-block forward attention must be allowed"
-    assert m2[0, 4] == neg, "future block must be masked"
-    assert m2[4, 0] == 0.0, "past block must be visible"
+    assert bool(m2[0, 3]), "within-block forward attention must be allowed (True=attend)"
+    assert not bool(m2[0, 4]), "future block must be masked (False)"
+    assert bool(m2[4, 0]), "past block must be visible (True)"
+    assert bool(m2.diagonal().all()), "diagonal must always be True (no fully-masked row)"
     print("[M1] mask semantics OK  (intra-block bidirectional, block-causal across)")
     print(f"[M1] patched module: {list(_PATCHED)[0]}")
 

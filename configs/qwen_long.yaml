@@ -1,43 +1,43 @@
-# Long run — Qwen2.5-0.5B AR->discrete-diffusion surgery. Tiny+modern => fast/cheap
-# to coherent German within the 3-4hr cap. Crash-safe (save_every 100) + auto-resume.
+# Qwen2.5-0.5B  AR -> masked-diffusion surgery.  Bidirectional via SDPA boolean
+# block-mask (is_causal auto-False); NO eager, NO additive -inf -> no backward hang.
+# Best tiny modern base (Qwen2 arch -> generic create_causal_mask patch). Language
+# -agnostic corpus (FineWeb-Edu). Crash-safe: save_every 100 + auto-resume.
 model:
-  name: Qwen/Qwen2.5-0.5B        # 0.5B, ungated, Qwen2-arch (create_causal_mask surgery works)
+  name: Qwen/Qwen2.5-0.5B          # 0.5B, ungated, Qwen2-arch
   block_size: 64
-  attn_implementation: sdpa
+  attn_implementation: sdpa        # MUST be sdpa: consumes the boolean block-mask
   trust_remote_code: false
-  compile: false
+  compile: false                   # keep off until a clean run is confirmed
   compile_mode: default
 
 data:
   hf_dataset: null
   hf_config: null
   jsonl_paths:
-    - data/openlegaldata_de.jsonl
-    - data/wikipedia_de.jsonl
-  corpus_weights: [1.5, 1.0]
+    - data/corpus.jsonl            # fetched on pod (fetch_corpus.py), then packed+cached
+  corpus_weights: null
   text_field: text
   max_length: 512
-  pack: true
+  pack: true                       # static shapes, zero PAD waste
   streaming: false
 
 train:
   output_dir: checkpoints/qwen_long
   epochs: 1000
   max_steps: 200000
-  per_device_batch_size: 64      # 0.5B is tiny => big batch fits B200 easily
-  grad_accum: 2                  # global 128 * 512 = ~65k tok/step
+  per_device_batch_size: 32        # 0.5B tiny; 32*512 ~16k tok/step, fits A6000 48GB
+  grad_accum: 2                    # global batch 64
   num_workers: 8
-  lr: 3.0e-4                     # small model trains from less-converged => higher LR
+  lr: 3.0e-4                       # small model from less-converged => higher LR
   warmup_steps: 200
   min_lr_ratio: 0.1
   weight_decay: 0.01
-  t_min: 0.05
-  mask_schedule: beta
-  mask_block_size: 64
-  loss_weight_alpha: 0.3
+  t_min: 1.0e-3                    # eps floor: bounds 1/t weight (<=1000), prevents inf grad
+  mask_schedule: uniform           # proven LLaDA t~U[t_min,1]
+  mask_block_size: 64              # block-aligned masking matches the attention blocks
+  loss_weight_alpha: 0.0           # 0.0 = pure 1/t LLaDA loss; raise to 0.3 to smooth variance
   grad_clip: 1.0
-  nan_loss_threshold: 10000
-  grad_checkpointing: false
+  grad_checkpointing: false        # leave OFF (was a co-trigger with the eager+mask hang)
   resume_from: null
   precision: bf16
   log_every: 20

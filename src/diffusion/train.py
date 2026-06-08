@@ -18,17 +18,11 @@ import os
 import sys
 import json
 import math
-import faulthandler
 import yaml
 
 import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-
-# DIAGNOSTIC: dump all thread stacks every 90s to stderr. During the intermittent
-# stall, repeated identical stacks reveal exactly where it's stuck (py-spy is
-# blocked in the RunPod container — no SYS_PTRACE — so this is how we profile).
-faulthandler.dump_traceback_later(90, repeat=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "data"))
@@ -139,7 +133,6 @@ def main(cfg_path: str) -> None:
     grad_clip = float(tcfg.get("grad_clip", 1.0))
     log_every = tcfg.get("log_every", 20)
     save_every = tcfg.get("save_every", 100)
-    nan_threshold = float(tcfg.get("nan_loss_threshold", 1e4))
 
     # realtime metrics file consumed by the monitor dashboard (src/monitor)
     import time
@@ -168,12 +161,11 @@ def main(cfg_path: str) -> None:
                         block_size=tcfg.get("mask_block_size", 0),
                         weight_alpha=float(tcfg.get("loss_weight_alpha", 0.3)),
                         attention_mask=batch.get("attention_mask"))
-                    # NaN/explosion guard: skip the update, don't poison the weights
-                    if not torch.isfinite(loss) or loss.item() > nan_threshold:
-                        accel.print(f"[train] WARN non-finite/exploding loss "
-                                    f"({loss.item():.1f}) at step {step} — skipping")
-                        optim.zero_grad(set_to_none=True)
-                        continue
+                    # boolean SDPA mask + clamped 1/t weight => loss finite by construction.
+                    # Cheap tripwire for the first 50 steps: fail loud on a real regression
+                    # instead of silently skipping (then it costs nothing).
+                    if step < 50:
+                        assert torch.isfinite(loss), f"non-finite loss at step {step}"
                     accel.backward(loss)
                     if accel.sync_gradients:
                         accel.clip_grad_norm_(model.parameters(), grad_clip)
