@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Berlin · FLUX Image Studio</title>
+<style>
+  :root{
+    --bg:#0b0c10; --panel:#14161f; --panel2:#181b25; --border:#242838; --border2:#2e3346;
+    --text:#e7eaf2; --dim:#9aa3b6; --mute:#6b7385; --accent:#7c8cff; --accent2:#4f6bff;
+    --soft:rgba(124,140,255,.16); --radius:16px;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{font-family:var(--font);color:var(--text);
+    background:radial-gradient(1100px 560px at 50% -10%,rgba(79,107,255,.10),transparent 60%),var(--bg);
+    display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
+  header{position:sticky;top:0;z-index:5;backdrop-filter:blur(12px);
+    background:linear-gradient(180deg,rgba(11,12,16,.92),rgba(11,12,16,.6));
+    border-bottom:1px solid var(--border);padding:13px 22px;display:flex;align-items:center;gap:14px}
+  .logo{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;
+    background:linear-gradient(135deg,#4f6bff,#6f5cff);font-size:18px}
+  h1{font-size:16px;margin:0;font-weight:650}
+  .sub{font-size:12px;color:var(--dim)}
+  .pill{margin-left:auto;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;
+    background:var(--soft);color:var(--accent);display:inline-flex;gap:6px;align-items:center}
+  .dot{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 8px #34d399}
+  .dot.off{background:#ff6565;box-shadow:0 0 8px #ff6565}
+  main{flex:1;display:flex;gap:20px;max-width:1200px;width:100%;margin:0 auto;padding:22px;min-height:0}
+  .controls{width:360px;flex:0 0 auto;display:flex;flex-direction:column;gap:14px}
+  .stage{flex:1;display:flex;align-items:center;justify-content:center;
+    background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+    min-height:420px;overflow:hidden;position:relative}
+  .stage img{max-width:100%;max-height:78vh;display:block;border-radius:10px}
+  .stage .placeholder{color:var(--mute);text-align:center;padding:30px;font-size:14px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+  textarea,input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--border2);
+    color:var(--text);border-radius:10px;padding:10px 12px;font-family:var(--font);font-size:14px;resize:vertical}
+  textarea{min-height:84px}
+  label{font-size:12px;color:var(--dim);display:block;margin:10px 0 5px;font-weight:600}
+  .row{display:flex;gap:10px}
+  .row>div{flex:1}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .val{font-family:var(--mono);font-size:12px;color:var(--accent);float:right}
+  button.gen{width:100%;margin-top:14px;padding:13px;border:none;border-radius:12px;cursor:pointer;
+    background:linear-gradient(135deg,#4f6bff,#6f5cff);color:#fff;font-size:15px;font-weight:650;
+    box-shadow:0 6px 20px rgba(79,107,255,.30);transition:transform .08s,opacity .15s}
+  button.gen:active{transform:scale(.98)}
+  button.gen:disabled{opacity:.5;cursor:not-allowed}
+  .meta{font-family:var(--mono);font-size:12px;color:var(--mute);margin-top:10px;text-align:center}
+  .err{color:#ff9b9b;font-size:13px;margin-top:8px}
+  .spin{width:34px;height:34px;border:3px solid var(--border2);border-top-color:var(--accent);
+    border-radius:50%;animation:s .8s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🖼️</div>
+  <div><h1>Berlin · FLUX Image Studio</h1><div class="sub">low-latency diffusion text-to-image</div></div>
+  <span class="pill" id="pill"><span class="dot off" id="dot"></span><span id="modelName">connecting…</span></span>
+</header>
+<main>
+  <div class="controls">
+    <div class="card">
+      <label>Prompt</label>
+      <textarea id="prompt" placeholder="A serene mountain lake at golden hour, photorealistic, 85mm, sharp detail">A serene mountain lake at golden hour, photorealistic, ultra-detailed, 85mm lens</textarea>
+      <label>Negative prompt <span style="color:var(--mute)">(ignored by FLUX-schnell)</span></label>
+      <textarea id="neg" style="min-height:44px" placeholder="blurry, low quality, watermark">blurry, low quality, watermark, text</textarea>
+      <label>Steps <span class="val" id="vSteps">4</span></label>
+      <input type="range" id="steps" min="1" max="12" value="4" />
+      <label>Guidance <span class="val" id="vGuid">0.0</span></label>
+      <input type="range" id="guid" min="0" max="8" step="0.5" value="0" />
+      <div class="row">
+        <div><label>Width <span class="val" id="vW">1024</span></label>
+          <input type="range" id="w" min="512" max="1280" step="64" value="1024" /></div>
+        <div><label>Height <span class="val" id="vH">1024</span></label>
+          <input type="range" id="h" min="512" max="1280" step="64" value="1024" /></div>
+      </div>
+      <label>Seed <span style="color:var(--mute)">(blank = random)</span></label>
+      <input type="number" id="seed" placeholder="random" />
+      <button class="gen" id="go">Generate</button>
+      <div class="err" id="err"></div>
+    </div>
+  </div>
+  <div class="stage" id="stage">
+    <div class="placeholder" id="ph">Your image appears here.<br/>Set a prompt and hit Generate.</div>
+  </div>
+</main>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const base=location.origin;
+  // live slider labels
+  const bind=(id,lab,fn)=>{const e=$(id);const u=()=>$(lab).textContent=fn?fn(e.value):e.value;e.addEventListener("input",u);u();};
+  bind("steps","vSteps");bind("guid","vGuid",v=>Number(v).toFixed(1));bind("w","vW");bind("h","vH");
+
+  fetch(base+"/api/health").then(r=>r.json()).then(d=>{
+    $("dot").classList.toggle("off",!d.ok);
+    $("modelName").textContent=d.ok?(d.model||"ready"):"offline";
+  }).catch(()=>{$("modelName").textContent="offline";});
+
+  $("go").addEventListener("click",async()=>{
+    const prompt=$("prompt").value.trim();
+    if(!prompt)return;
+    $("err").textContent="";
+    $("go").disabled=true;$("go").textContent="Generating…";
+    const stage=$("stage");
+    const t0=performance.now();
+    stage.innerHTML='<div class="spin"></div>';
+    try{
+      const body={prompt,negative_prompt:$("neg").value,steps:+$("steps").value,
+        guidance:+$("guid").value,width:+$("w").value,height:+$("h").value};
+      const sv=$("seed").value.trim();if(sv!=="")body.seed=+sv;
+      const r=await fetch(base+"/api/generate",{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const d=await r.json();
+      if(!r.ok||d.error)throw new Error(d.error||("HTTP "+r.status));
+      const img=new Image();img.src="data:image/png;base64,"+d.image;
+      img.onload=()=>{stage.innerHTML="";stage.appendChild(img);
+        const m=document.createElement("div");m.className="meta";m.style.position="absolute";
+        m.style.bottom="8px";m.style.left="0";m.style.right="0";
+        m.textContent=`${d.width}×${d.height} · ${d.steps} steps · ${d.seconds}s`;
+        stage.appendChild(m);};
+    }catch(e){
+      stage.innerHTML='<div class="placeholder">generation failed</div>';
+      $("err").textContent=String(e.message||e);
+    }finally{$("go").disabled=false;$("go").textContent="Generate";}
+  });
+})();
+</script>
+</body>
+</html>
